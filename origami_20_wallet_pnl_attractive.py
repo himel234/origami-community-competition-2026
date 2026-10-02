@@ -88,16 +88,58 @@ USERNAMES = {
 }
 
 SESSION = requests.Session()
-SESSION.headers.update({"Content-Type": "application/json"})
+SESSION.headers.update({
+    "Content-Type": "application/json",
+    "User-Agent": "Origami-Competition-Leaderboard/1.0",
+})
 
 CACHE = {}
 CACHE_LOCK = threading.Lock()
+API_CALL_LOCK = threading.Lock()
+LAST_API_CALL = 0.0
 
 
-def api(payload):
-    r = SESSION.post(API_URL, json=payload, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
-    return r.json()
+def safe_float(value):
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def api(payload, retries=4):
+    global LAST_API_CALL
+
+    last_error = None
+
+    for attempt in range(retries):
+        try:
+            # Avoid bursting the public API.
+            with API_CALL_LOCK:
+                wait = 0.20 - (time.time() - LAST_API_CALL)
+                if wait > 0:
+                    time.sleep(wait)
+                LAST_API_CALL = time.time()
+
+            r = SESSION.post(
+                API_URL,
+                json=payload,
+                timeout=15,
+            )
+
+            if r.status_code == 429:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+
+            r.raise_for_status()
+            return r.json()
+
+        except Exception as e:
+            last_error = e
+            time.sleep(0.8 * (attempt + 1))
+
+    raise RuntimeError(
+        "Hyperliquid API failed after retries: " + repr(last_error)
+    )
 
 
 def now_utc():
@@ -330,20 +372,37 @@ PAYLOAD_CACHE_LOCK = threading.Lock()
 def build_payload():
     current_time = time.time()
     with PAYLOAD_CACHE_LOCK:
-        if PAYLOAD_CACHE["data"] is not None and current_time - PAYLOAD_CACHE["time"] < 45:
+        if PAYLOAD_CACHE["data"] is not None and current_time - PAYLOAD_CACHE["time"] < 120:
             return PAYLOAD_CACHE["data"]
 
     current = now_utc()
     wallet_rows = []
 
     for wallet in WALLETS:
-        days, week = build_wallet_data(wallet, current)
+        try:
+            days, week = build_wallet_data(wallet, current)
+            error = None
+        except Exception as e:
+            print("WALLET ERROR", wallet, repr(e), flush=True)
+            days = [{
+                "status": "error",
+                "volume": None,
+                "pnl": None,
+                "fills": 0,
+            } for _ in range(7)]
+            week = {
+                "status": "error",
+                "volume": None,
+                "pnl": None,
+            }
+            error = str(e)
 
         row = {
             "wallet": wallet,
             "name": username(wallet),
             "days": days,
             "week": week,
+            "error": error,
         }
 
         # Daily points for Volume and PnL.
@@ -576,6 +635,13 @@ async function load(){
  try{
   const r=await fetch('/data?t='+Date.now(),{cache:'no-store'});
   DATA=await r.json();
+  if(DATA.error){
+    document.getElementById("app").innerHTML =
+      '<div class="card"><b>Data temporarily unavailable.</b><br><span class="muted">'+
+      esc(DATA.details || DATA.error)+
+      '</span><br><br>Retrying automatically…</div>';
+    return;
+  }
   renderTabs(); render();
  }catch(e){
   document.getElementById("app").innerHTML='<div class="card">Data temporarily unavailable. Retrying…</div>';
@@ -613,8 +679,13 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             print("ERROR:", repr(e), flush=True)
             self.send_text(
-                500,
-                json.dumps({"error": str(e)}),
+                200,
+                json.dumps({
+                    "error": "Leaderboard data request failed",
+                    "details": str(e),
+                    "wallets": [],
+                    "competition": {}
+                }),
                 "application/json; charset=utf-8",
             )
 
