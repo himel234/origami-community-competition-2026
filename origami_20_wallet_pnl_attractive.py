@@ -1,503 +1,633 @@
-import os, json, sqlite3, threading, time
+import json
+import os
+import threading
+import time
 from datetime import datetime, timezone, timedelta
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import requests
 
 # ============================================================
-# HYPERLIQUID COMMUNITY TRADING COMPETITION
-# 2 Oct 2026 00:00 UTC -> 9 Oct 2026 00:00 UTC
+# Hyperliquid Community Trading Competition 2026
+# Competition: 2026-10-02 00:00 UTC -> 2026-10-09 00:00 UTC
+#
+# Data source:
+#   Hyperliquid public Info API
+#
+# Volume:
+#   Exact executed fills inside each UTC competition day.
+#
+# PnL:
+#   Hyperliquid portfolio "perpWeek" PnL history.
+#   Daily PnL = PnL value at the end boundary - PnL value
+#   at the start boundary.
+#
+# IMPORTANT:
+# Hyperliquid portfolio graphs are sampled periodically. Therefore
+# the PnL shown here is the Hyperliquid portfolio-graph metric, using
+# the closest available samples to the UTC boundaries. It is NOT a
+# fabricated rolling-24h value.
 # ============================================================
 
-DATA_URL = "https://dw3ji7n7thadj.cloudfront.net/aggregator/builders/0x9b451f8941240db8bedc99bff8917a2ed9550074_v2.json"
+API_URL = "https://api.hyperliquid.xyz/info"
+
 START = datetime(2026, 10, 2, 0, 0, tzinfo=timezone.utc)
-END   = datetime(2026, 10, 9, 0, 0, tzinfo=timezone.utc)
-REFRESH_SECONDS = 30
-DB_FILE = "origami_competition.sqlite3"
+END = datetime(2026, 10, 9, 0, 0, tzinfo=timezone.utc)
 
-WALLETS = ["0x28d6dda751db999b991ed169bb773e8e855c36c2", "0x6188c0c04bd502541b77d8cd43667944437b3eda", "0x6e5234204cd2015baf121b6934eab4d4f40a07ce", "0xfff111cdc96472c137596a91d001fd870557501c", "0x14280d8e1a1e490a3665563479e581280d32e441", "0xfcb4dbcb3dbe57f02f4a5fa603a1da948f549673", "0xbfbbb7a23d740648547f11797de7c157af81cac8", "0xbf787b37c4db340088b154e3c343f4d94508ac8c", "0x7e2df435ffaa20800713a1f1e770c1b093bacda5", "0xe254c53e776bb1b434f9d81bc93c246d08069bd6", "0x097e0a249c065e279ec08ea021cff3dd11c32d41", "0x8c641e56994b18b18d9bc754655c2892b80b3315", "0xb29b8367e3a07928d5aa788bd9137d8c416e65ae", "0x6f23925a69097b2ac7bf67e24b68cbb6382ca656", "0x28a97f53f11becbb1d531ed26a953cba87d115c8", "0x03a506eb9548fd844f60e65b35e56e5472f70c00", "0x4137bff4666989e877ade32e09ba8035cb0b1359", "0x88a30b45ca1fe48898675c6e4420b0090b0eba5e", "0x779c0a1345375b21839e4053419d9fdd6a432cce", "0x94aa8c596c405ac056e5caa2f08870c947a98e2a", "0x7f2663fc903d269a9670ce5ad76d92f7a0b70e66", "0x8a591916b925c399a4d2791d186dfae5366cc12a"]
-USERNAMES = {"0x28d6dda751db999b991ed169bb773e8e855c36c2": "@shamim215", "0x6188c0c04bd502541b77d8cd43667944437b3eda": "@puperet", "0x6e5234204cd2015baf121b6934eab4d4f40a07ce": "", "0xfff111cdc96472c137596a91d001fd870557501c": "@BARYSBYEK", "0x14280d8e1a1e490a3665563479e581280d32e441": "", "0xfcb4dbcb3dbe57f02f4a5fa603a1da948f549673": "@himel234", "0xbfbbb7a23d740648547f11797de7c157af81cac8": "", "0xbf787b37c4db340088b154e3c343f4d94508ac8c": "@tomtop", "0x7e2df435ffaa20800713a1f1e770c1b093bacda5": "", "0xe254c53e776bb1b434f9d81bc93c246d08069bd6": "", "0x097e0a249c065e279ec08ea021cff3dd11c32d41": "@abshamweb3", "0x8c641e56994b18b18d9bc754655c2892b80b3315": "", "0xb29b8367e3a07928d5aa788bd9137d8c416e65ae": "@madikpeju", "0x6f23925a69097b2ac7bf67e24b68cbb6382ca656": "", "0x28a97f53f11becbb1d531ed26a953cba87d115c8": "@Edward6742", "0x03a506eb9548fd844f60e65b35e56e5472f70c00": "", "0x4137bff4666989e877ade32e09ba8035cb0b1359": "", "0x88a30b45ca1fe48898675c6e4420b0090b0eba5e": "", "0x779c0a1345375b21839e4053419d9fdd6a432cce": "", "0x94aa8c596c405ac056e5caa2f08870c947a98e2a": "", "0x7f2663fc903d269a9670ce5ad76d92f7a0b70e66": "@Safal818", "0x8a591916b925c399a4d2791d186dfae5366cc12a": "@Eleonore3663"}
+REFRESH_SECONDS = 60
+REQUEST_TIMEOUT = 20
 
-POINTS = [10, 8, 6, 4, 2]
+WALLETS = [
+    "0x28d6dda751db999b991ed169bb773e8e855c36c2",
+    "0x6188c0c04bd502541b77d8cd43667944437b3eda",
+    "0x6e5234204cd2015baf121b6934eab4d4f40a07ce",
+    "0xfff111cdc96472c137596a91d001fd870557501c",
+    "0x14280d8e1a1e490a3665563479e581280d32e441",
+    "0xfcb4dbcb3dbe57f02f4a5fa603a1da948f549673",
+    "0xbfbbb7a23d740648547f11797de7c157af81cac8",
+    "0xbf787b37c4db340088b154e3c343f4d94508ac8c",
+    "0x7e2df435ffaa20800713a1f1e770c1b093bacda5",
+    "0xe254c53e776bb1b434f9d81bc93c246d08069bd6",
+    "0x097e0a249c065e279ec08ea021cff3dd11c32d41",
+    "0x8c641e56994b18b18d9bc754655c2892b80b3315",
+    "0xb29b8367e3a07928d5aa788bd9137d8c416e65ae",
+    "0x6f23925a69097b2ac7bf67e24b68cbb6382ca656",
+    "0x28a97f53f11becbb1d531ed26a953cba87d115c8",
+    "0x03a506eb9548fd844f60e65b35e56e5472f70c00",
+    "0x4137bff4666989e877ade32e09ba8035cb0b1359",
+    "0x88a30b45ca1fe48898675c6e4420b0090b0eba5e",
+    "0x779c0a1345375b21839e4053419d9fdd6a432cce",
+    "0x94aa8c596c405ac056e5caa2f08870c947a98e2a",
+    "0x7f2663fc903d269a9670ce5ad76d92f7a0b70e66",
+    "0x8a591916b925c399a4d2791d186dfae5366cc12a",
+]
 
-# ============================================================
-# DATABASE
-# ============================================================
+USERNAMES = {
+    WALLETS[0]: "@shamim215",
+    WALLETS[1]: "@puperet",
+    WALLETS[2]: "",
+    WALLETS[3]: "@BARYSBYEK",
+    WALLETS[4]: "",
+    WALLETS[5]: "@himel234",
+    WALLETS[6]: "",
+    WALLETS[7]: "@tomtop",
+    WALLETS[8]: "",
+    WALLETS[9]: "",
+    WALLETS[10]: "@abshamweb3",
+    WALLETS[11]: "",
+    WALLETS[12]: "@madikpeju",
+    WALLETS[13]: "",
+    WALLETS[14]: "@Edward6742",
+    WALLETS[15]: "",
+    WALLETS[16]: "",
+    WALLETS[17]: "",
+    WALLETS[18]: "",
+    WALLETS[19]: "",
+    WALLETS[20]: "@Safal818",
+    WALLETS[21]: "@Eleonore3663",
+}
 
-def db():
-    con = sqlite3.connect(DB_FILE, check_same_thread=False)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS daily_snapshots (
-            day TEXT NOT NULL,
-            wallet TEXT NOT NULL,
-            volume REAL NOT NULL,
-            pnl REAL NOT NULL,
-            captured_at TEXT NOT NULL,
-            PRIMARY KEY(day, wallet)
-        )
-    """)
-    con.commit()
-    return con
+SESSION = requests.Session()
+SESSION.headers.update({"Content-Type": "application/json"})
 
-DB = db()
+CACHE = {}
+CACHE_LOCK = threading.Lock()
 
-# ============================================================
-# DATA HELPERS
-# ============================================================
 
-def norm_address(value):
-    if not isinstance(value, str):
-        return None
-    value = value.strip()
-    if len(value) == 42 and value.startswith("0x"):
-        try:
-            int(value[2:], 16)
-            return value.lower()
-        except ValueError:
-            return None
+def api(payload):
+    r = SESSION.post(API_URL, json=payload, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
+    return r.json()
+
+
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def ms(dt):
+    return int(dt.timestamp() * 1000)
+
+
+def money(x):
+    try:
+        return float(x)
+    except Exception:
+        return 0.0
+
+
+def short_wallet(w):
+    return w[:6] + "..." + w[-4:]
+
+
+def username(wallet):
+    return USERNAMES.get(wallet, "") or short_wallet(wallet)
+
+
+def portfolio(wallet):
+    key = ("portfolio", wallet)
+    data = api({"type": "portfolio", "user": wallet})
+    with CACHE_LOCK:
+        CACHE[key] = data
+    return data
+
+
+def get_window(data, name):
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, list) and len(item) == 2 and item[0] == name:
+                return item[1]
     return None
 
 
-def extract_wallet_records(section):
-    records = []
-
-    def walk(node):
-        if isinstance(node, dict):
-            address = None
-            for key in ("address", "user", "wallet", "account"):
-                candidate = norm_address(node.get(key))
-                if candidate:
-                    address = candidate
-                    break
-
-            if address:
-                records.append((address, node))
-
-            for value in node.values():
-                walk(value)
-
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(section)
-    return records
-
-
-def find_users(data, tf="24h"):
-    candidates = []
-
-    def search_timeframe(node):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if str(key).lower() == tf.lower():
-                    extracted = extract_wallet_records(value)
-                    if extracted:
-                        candidates.extend(extracted)
-                search_timeframe(value)
-
-        elif isinstance(node, list):
-            for item in node:
-                search_timeframe(item)
-
-    search_timeframe(data)
-
-    result = {}
-    for address, record in candidates:
-        result[address] = record
-
-    return result
-
-
-def num(obj, names):
-    for n in names:
-        if isinstance(obj, dict) and obj.get(n) is not None:
-            try:
-                return float(obj[n])
-            except:
-                pass
-    return 0.0
-
-def fetch_24h():
-    r = requests.get(DATA_URL + ("&" if "?" in DATA_URL else "?") + "_ts=" + str(int(time.time())), timeout=30)
-    r.raise_for_status()
-    return find_users(r.json(), "24h")
-
-# ============================================================
-# DAILY SNAPSHOTS
-#
-# At/after each UTC midnight, the 24h HyperTracker window
-# represents the previous competition day. We save it once.
-# ============================================================
-
-def competition_day(now):
-    if now < START:
-        return None
-    if now >= END:
-        return None
-    return (now.date() - START.date()).days
-
-def save_snapshot_for_day(day_index, users):
-    if day_index < 0 or day_index > 6:
-        return
-    day = (START.date() + timedelta(days=day_index)).isoformat()
-    captured = datetime.now(timezone.utc).isoformat()
-    with DB:
-        for w in WALLETS:
-            u = users.get(w.lower(), {})
-            volume = num(u, ["volume"])
-            pnl = num(u, ["pnl"])
-            DB.execute("""
-                INSERT OR REPLACE INTO daily_snapshots
-                (day,wallet,volume,pnl,captured_at)
-                VALUES (?,?,?,?,?)
-            """, (day, w.lower(), volume, pnl, captured))
-
-def capture_finished_days(users):
-    now = datetime.now(timezone.utc)
-    # If today is Oct 3, day 0 (Oct 2) is finished, etc.
-    for i in range(7):
-        cutoff = START + timedelta(days=i+1)
-        if now >= cutoff:
-            # Do not overwrite a snapshot once it has been captured.
-            day = (START.date() + timedelta(days=i)).isoformat()
-            exists = DB.execute(
-                "SELECT 1 FROM daily_snapshots WHERE day=? LIMIT 1", (day,)
-            ).fetchone()
-            if not exists:
-                save_snapshot_for_day(i, users)
-
-def latest_users():
-    try:
-        return fetch_24h()
-    except Exception:
-        return {}
-
-def snapshot_loop():
-    while True:
+def get_perp_week_history(wallet):
+    data = portfolio(wallet)
+    obj = get_window(data, "perpWeek")
+    if not obj:
+        # Fallback if an account has no perpWeek data.
+        obj = get_window(data, "week")
+    if not obj:
+        return []
+    hist = obj.get("pnlHistory", [])
+    out = []
+    for item in hist:
+        if not isinstance(item, list) or len(item) != 2:
+            continue
         try:
-            users = latest_users()
-            if users:
-                capture_finished_days(users)
-                print(f"CMM 24h users loaded: {len(users)}")
-            else:
-                print("WARNING: CMM 24h users loaded: 0")
+            out.append((int(item[0]), float(item[1])))
         except Exception:
             pass
-        time.sleep(REFRESH_SECONDS)
+    return sorted(out)
 
-threading.Thread(target=snapshot_loop, daemon=True).start()
 
-# ============================================================
-# SCORING
-# ============================================================
+def nearest_pnl(history, target_ms, max_distance_minutes=20):
+    if not history:
+        return None
+    best = min(history, key=lambda x: abs(x[0] - target_ms))
+    if abs(best[0] - target_ms) > max_distance_minutes * 60 * 1000:
+        return None
+    return best[1]
 
-def daily_rows():
-    rows = {}
-    for i in range(7):
-        day = (START.date() + timedelta(days=i)).isoformat()
-        data = DB.execute(
-            "SELECT wallet, volume, pnl, captured_at FROM daily_snapshots WHERE day=?",
-            (day,)
-        ).fetchall()
-        rows[day] = {
-            w: {"volume": 0.0, "pnl": 0.0, "captured_at": None}
-            for w in WALLETS
+
+def exact_fills(wallet, start_dt, end_dt):
+    """Fetch all fills in the requested period.
+
+    Hyperliquid returns at most 2000 per response. We page backwards
+    through the requested range using endTime.
+    """
+    start_ms = ms(start_dt)
+    end_ms = ms(end_dt)
+
+    all_fills = []
+    cursor_end = end_ms
+    seen = set()
+
+    while cursor_end >= start_ms:
+        payload = {
+            "type": "userFillsByTime",
+            "user": wallet,
+            "startTime": start_ms,
+            "endTime": cursor_end,
+            "aggregateByTime": False,
         }
-        for w, volume, pnl, captured in data:
-            rows[day][w] = {
-                "volume": float(volume),
-                "pnl": float(pnl),
-                "captured_at": captured
-            }
-    return rows
+        fills = api(payload)
 
-def rank_points(values, positive_only=False):
-    eligible = []
-    for wallet, value in values.items():
-        if positive_only and value <= 0:
+        if not isinstance(fills, list) or not fills:
+            break
+
+        new_count = 0
+        oldest = None
+
+        for f in fills:
+            try:
+                t = int(f.get("time", 0))
+            except Exception:
+                continue
+
+            if t < start_ms or t > end_ms:
+                continue
+
+            tid = str(f.get("tid", "")) + ":" + str(t)
+            if tid in seen:
+                continue
+
+            seen.add(tid)
+            all_fills.append(f)
+            new_count += 1
+
+            if oldest is None or t < oldest:
+                oldest = t
+
+        if len(fills) < 2000:
+            break
+
+        if oldest is None or oldest <= start_ms or new_count == 0:
+            break
+
+        # Move the end before the oldest returned fill to avoid duplicates.
+        cursor_end = oldest - 1
+
+    return all_fills
+
+
+def fill_volume(fills):
+    total = 0.0
+    for f in fills:
+        try:
+            total += abs(float(f["px"]) * float(f["sz"]))
+        except Exception:
+            pass
+    return total
+
+
+def build_wallet_data(wallet, current):
+    # Fetch the competition-period fills once per wallet, then partition
+    # them into UTC days. This avoids making 7 separate fill requests.
+    end_for_volume = min(current, END)
+    fills = []
+    if end_for_volume > START:
+        fills = exact_fills(wallet, START, end_for_volume)
+
+    # Fetch portfolio history once per wallet and reuse it for all days.
+    history = get_perp_week_history(wallet)
+
+    days = []
+    for day_index in range(7):
+        day_start = START + timedelta(days=day_index)
+        day_end = day_start + timedelta(days=1)
+
+        if current < day_end:
+            days.append({
+                "status": "pending",
+                "volume": None,
+                "pnl": None,
+                "fills": 0,
+            })
             continue
-        eligible.append((wallet, value))
-    eligible.sort(key=lambda x: x[1], reverse=True)
-    pts = {w: 0 for w in values}
-    rank = 1
-    for wallet, value in eligible[:5]:
-        pts[wallet] = POINTS[rank-1]
-        rank += 1
-    return pts
 
-def build_standings():
-    days = daily_rows()
-    result = {
-        w: {
-            "wallet": w,
-            "username": USERNAMES.get(w, ""),
-            "daily_volume_points": [],
-            "daily_pnl_points": [],
-            "volume": 0.0,
-            "pnl": 0.0
-        } for w in WALLETS
+        day_fills = [
+            f for f in fills
+            if ms(day_start) <= int(f.get("time", 0)) < ms(min(day_end, END))
+        ]
+
+        p0 = nearest_pnl(history, ms(day_start))
+        p1 = nearest_pnl(history, ms(day_end))
+
+        pnl = None if p0 is None or p1 is None else (p1 - p0)
+
+        days.append({
+            "status": "complete" if pnl is not None else "pnl_pending",
+            "volume": fill_volume(day_fills),
+            "pnl": pnl,
+            "fills": len(day_fills),
+        })
+
+    weekly_volume = fill_volume(fills)
+
+    p0 = nearest_pnl(history, ms(START))
+    weekly_end = END if current >= END else current
+    p1 = nearest_pnl(history, ms(weekly_end))
+    weekly_pnl = None if p0 is None or p1 is None else (p1 - p0)
+
+    if current < START:
+        weekly_status = "pending"
+    elif current >= END and weekly_pnl is not None:
+        weekly_status = "complete"
+    elif weekly_pnl is None:
+        weekly_status = "pnl_pending"
+    else:
+        weekly_status = "running"
+
+    return days, {
+        "status": weekly_status,
+        "volume": weekly_volume if end_for_volume > START else None,
+        "pnl": weekly_pnl,
     }
 
-    for i in range(7):
-        day = (START.date() + timedelta(days=i)).isoformat()
-        vals_v = {w: days[day][w]["volume"] for w in WALLETS}
-        vals_p = {w: days[day][w]["pnl"] for w in WALLETS}
-        vp = rank_points(vals_v)
-        pp = rank_points(vals_p, positive_only=True)
-        for w in WALLETS:
-            result[w]["daily_volume_points"].append(vp[w])
-            result[w]["daily_pnl_points"].append(pp[w])
-            result[w]["volume"] += vals_v[w]
-            result[w]["pnl"] += vals_p[w]
 
-    # Weekly rank points from full 7-day totals.
-    volume_weekly_points = rank_points(
-        {w: result[w]["volume"] for w in WALLETS}
-    )
-    pnl_weekly_points = rank_points(
-        {w: result[w]["pnl"] for w in WALLETS},
-        positive_only=True
-    )
+def compute_points(rows, field, positive_only=False):
+    eligible = []
+    for r in rows:
+        value = r.get(field)
+        if value is None:
+            continue
+        if positive_only and value <= 0:
+            continue
+        eligible.append(r)
 
-    for w in WALLETS:
-        dv = result[w]["daily_volume_points"]
-        dp = result[w]["daily_pnl_points"]
-        result[w]["volume_avg_daily"] = sum(dv) / 7
-        result[w]["pnl_avg_daily"] = sum(dp) / 7
-        result[w]["volume_weekly_points"] = volume_weekly_points[w]
-        result[w]["pnl_weekly_points"] = pnl_weekly_points[w]
-        result[w]["volume_final_score"] = 0.8 * result[w]["volume_avg_daily"] + 0.2 * volume_weekly_points[w]
-        result[w]["pnl_final_score"] = 0.8 * result[w]["pnl_avg_daily"] + 0.2 * pnl_weekly_points[w]
-        result[w]["pnl_qualified"] = result[w]["volume"] >= 20000 and result[w]["pnl"] > 0
+    eligible.sort(key=lambda r: r[field], reverse=True)
 
-    volume_rank = sorted(result.values(), key=lambda x: (-x["volume_final_score"], -x["volume"]))
-    pnl_rank = sorted(
-        result.values(),
-        key=lambda x: (
-            -(x["pnl_final_score"] if x["pnl_qualified"] else -1),
-            -x["pnl"]
+    points = [10, 8, 6, 4, 2]
+    for i, r in enumerate(eligible[:5]):
+        r[field + "_points"] = points[i]
+
+    for r in rows:
+        r.setdefault(field + "_points", 0)
+
+
+PAYLOAD_CACHE = {"time": 0.0, "data": None}
+PAYLOAD_CACHE_LOCK = threading.Lock()
+
+def build_payload():
+    current_time = time.time()
+    with PAYLOAD_CACHE_LOCK:
+        if PAYLOAD_CACHE["data"] is not None and current_time - PAYLOAD_CACHE["time"] < 45:
+            return PAYLOAD_CACHE["data"]
+
+    current = now_utc()
+    wallet_rows = []
+
+    for wallet in WALLETS:
+        days, week = build_wallet_data(wallet, current)
+
+        row = {
+            "wallet": wallet,
+            "name": username(wallet),
+            "days": days,
+            "week": week,
+        }
+
+        # Daily points for Volume and PnL.
+        for i in range(7):
+            row["days"][i]["volume_points"] = 0
+            row["days"][i]["pnl_points"] = 0
+
+        wallet_rows.append(row)
+
+    # Assign daily points independently.
+    for day_index in range(7):
+        day_rows = []
+        for r in wallet_rows:
+            d = r["days"][day_index]
+            day_rows.append({
+                "wallet": r["wallet"],
+                "name": r["name"],
+                "volume": d["volume"],
+                "pnl": d["pnl"],
+                "days": r["days"],
+            })
+
+        compute_points(day_rows, "volume", positive_only=False)
+        compute_points(day_rows, "pnl", positive_only=True)
+
+        by_wallet = {x["wallet"]: x for x in day_rows}
+        for r in wallet_rows:
+            r["days"][day_index]["volume_points"] = by_wallet[r["wallet"]]["volume_points"]
+            r["days"][day_index]["pnl_points"] = by_wallet[r["wallet"]]["pnl_points"]
+
+    # Weekly points.
+    week_rows = []
+    for r in wallet_rows:
+        week_rows.append({
+            "wallet": r["wallet"],
+            "name": r["name"],
+            "volume": r["week"]["volume"],
+            "pnl": r["week"]["pnl"],
+        })
+
+    compute_points(week_rows, "volume", positive_only=False)
+    compute_points(week_rows, "pnl", positive_only=True)
+
+    for r in wallet_rows:
+        x = next(z for z in week_rows if z["wallet"] == r["wallet"])
+        r["week"]["volume_points"] = x["volume_points"]
+        r["week"]["pnl_points"] = x["pnl_points"]
+
+    # Final scores.
+    for r in wallet_rows:
+        volume_daily = [d["volume_points"] for d in r["days"]]
+        pnl_daily = [d["pnl_points"] for d in r["days"]]
+
+        r["volume_avg_daily"] = sum(volume_daily) / 7.0
+        r["pnl_avg_daily"] = sum(pnl_daily) / 7.0
+
+        r["volume_final_score"] = (
+            0.8 * r["volume_avg_daily"] + 0.2 * r["week"]["volume_points"]
         )
-    )
-    return days, volume_rank, pnl_rank
+        r["pnl_final_score"] = (
+            0.8 * r["pnl_avg_daily"] + 0.2 * r["week"]["pnl_points"]
+        )
 
-# ============================================================
-# WEBSITE
-# ============================================================
+        weekly_volume = r["week"]["volume"]
+        weekly_pnl = r["week"]["pnl"]
+
+        r["pnl_qualified"] = (
+            weekly_volume is not None
+            and weekly_pnl is not None
+            and weekly_volume >= 20000
+            and weekly_pnl > 0
+        )
+
+    result = {
+        "competition": {
+            "start": START.isoformat(),
+            "end": END.isoformat(),
+            "now": current.isoformat(),
+            "days": [
+                (START + timedelta(days=i)).strftime("%Y-%m-%d")
+                for i in range(7)
+            ],
+        },
+        "wallets": wallet_rows,
+    }
+
+    with PAYLOAD_CACHE_LOCK:
+        PAYLOAD_CACHE["time"] = time.time()
+        PAYLOAD_CACHE["data"] = result
+
+    return result
 
 
 HTML = r"""<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Origami × Hyperliquid Community Competition</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hyperliquid Community Competition 2026</title>
 <style>
-:root{--bg:#07090d;--panel:#0d1118;--panel2:#111722;--line:#202734;--text:#f4f7fb;--muted:#8993a5;--green:#36e29a;--red:#ff647c;--gold:#f5c76a;--blue:#70a7ff}
-*{box-sizing:border-box}
-body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);background:radial-gradient(circle at 50% -10%,rgba(54,226,154,.12),transparent 35%),radial-gradient(circle at 90% 20%,rgba(91,116,255,.08),transparent 28%),var(--bg)}
-.wrap{max-width:1320px;margin:auto;padding:26px 18px 55px}
-.topbar{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:22px}
-.brand{display:flex;align-items:center;gap:12px}.logo{width:42px;height:42px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(135deg,#1be395,#0f8d62);color:#06100c;font-weight:900;font-size:21px}.brand h1{font-size:19px;margin:0}.brand p{margin:3px 0 0;color:var(--muted);font-size:11px}
-.live{display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--line);border-radius:999px;background:rgba(13,17,24,.8);font-size:11px;color:#b8c1d0}.dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green)}
-.hero{border:1px solid var(--line);border-radius:22px;padding:25px;background:linear-gradient(145deg,rgba(18,24,34,.95),rgba(9,12,17,.96));box-shadow:0 18px 60px rgba(0,0,0,.28);margin-bottom:16px}
-.kicker{font-size:11px;color:var(--green);font-weight:800;letter-spacing:1.5px;text-transform:uppercase}.hero h2{font-size:29px;margin:8px 0 5px;letter-spacing:-1px}.hero p{margin:0;color:var(--muted);font-size:13px}.dates{margin-top:17px;display:flex;gap:9px;flex-wrap:wrap}.date{border:1px solid var(--line);background:rgba(255,255,255,.025);border-radius:12px;padding:10px 12px;font-size:11px}.date b{display:block;font-size:13px}.date span{color:var(--muted)}
-.stats{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}.stat{min-width:125px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.02)}.stat b{display:block;font-size:17px}.stat span{display:block;color:var(--muted);font-size:10px;margin-top:3px;text-transform:uppercase;letter-spacing:.7px}
-.streams{display:flex;gap:8px;margin:17px 0 12px}.stream{border:1px solid var(--line);background:var(--panel);color:var(--muted);padding:10px 18px;border-radius:11px;cursor:pointer;font-weight:850;font-size:12px}.stream.active{background:#eafcf5;color:#07110d}
-.daytabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:15px}.day{border:1px solid var(--line);background:transparent;color:var(--muted);padding:8px 11px;border-radius:9px;cursor:pointer;font-weight:800;font-size:10px}.day.active{border-color:#354052;color:var(--text);background:#151b25}
-.panel{border:1px solid var(--line);border-radius:18px;overflow:hidden;background:rgba(13,17,24,.92)}.panelHead{padding:17px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:12px;align-items:center}.panelHead h3{margin:0;font-size:14px}.panelHead span{color:var(--muted);font-size:10px}
-table{width:100%;border-collapse:collapse}th{background:#0a0e14;color:#687385;font-size:9px;letter-spacing:1px;text-transform:uppercase;font-weight:800}th,td{padding:13px 11px;border-bottom:1px solid #191f29;text-align:right}tr:last-child td{border-bottom:0}tbody tr:hover{background:rgba(255,255,255,.025)}th:first-child,td:first-child{text-align:center;width:55px}th:nth-child(2),td:nth-child(2){text-align:left}.rank{font-weight:900;color:#9da8b8}.rank.top{color:var(--gold)}.trader{display:flex;align-items:center;gap:9px}.avatar{width:31px;height:31px;border-radius:9px;display:grid;place-items:center;background:#161d28;border:1px solid #27303e;font-size:10px;font-weight:900}.name{font-weight:750;font-size:12px}.wallet{font:9px ui-monospace,SFMono-Regular,Menlo,monospace;color:#697487;margin-top:3px}.num{font-variant-numeric:tabular-nums;font-weight:700;font-size:11px}.score{font-size:13px;font-weight:900;color:var(--green)}.pnl{font-size:12px;font-weight:900}.pos{color:var(--green)}.neg{color:var(--red)}.qual{font-size:9px;font-weight:900;padding:4px 7px;border-radius:7px}.yes{background:rgba(54,226,154,.1);color:var(--green)}.no{background:rgba(255,100,124,.1);color:var(--red)}
-.note{margin-top:12px;color:#697487;font-size:10px;line-height:1.6}.err{padding:16px;border:1px solid rgba(255,100,124,.25);background:rgba(255,100,124,.07);color:#ff9aaa;border-radius:13px}
-.footer{display:flex;justify-content:space-between;color:#566172;font-size:10px;margin-top:14px;padding:0 3px}
-@media(max-width:850px){.topbar{align-items:flex-start}.hero h2{font-size:24px}.panel{overflow-x:auto}table{min-width:980px}}
+body{margin:0;background:#07090d;color:#f3f5f7;font-family:Inter,Arial,sans-serif}
+.wrap{max-width:1250px;margin:auto;padding:28px 18px 60px}
+h1{margin:0 0 8px;font-size:30px}
+.sub{color:#9da6b2;margin-bottom:20px}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:15px 0}
+button{background:#121722;color:#dfe5ec;border:1px solid #293142;border-radius:10px;padding:9px 13px;cursor:pointer}
+button.active{background:#fff;color:#080a0d}
+.card{background:#0d1118;border:1px solid #1f2633;border-radius:16px;padding:16px;margin-bottom:18px;overflow:auto}
+table{width:100%;border-collapse:collapse;min-width:900px}
+th,td{padding:12px 10px;border-bottom:1px solid #1c2330;text-align:right;white-space:nowrap}
+th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+th{color:#8f9aaa;font-size:12px;text-transform:uppercase}
+.rank{font-weight:800}
+.green{color:#6ee7a1}
+.red{color:#ff7b8a}
+.muted{color:#737d8d}
+.badge{padding:4px 7px;border-radius:7px;background:#18202d;color:#aeb8c6;font-size:11px}
+.note{font-size:13px;color:#929dac;line-height:1.5}
 </style>
 </head>
 <body>
 <div class="wrap">
-<div class="topbar">
-  <div class="brand"><div class="logo">O</div><div><h1>Origami × Hyperliquid</h1><p>Community Trading Competition</p></div></div>
-  <div class="live"><span class="dot"></span> LIVE DATA</div>
+<h1>🏆 Hyperliquid Community Trading Competition</h1>
+<div class="sub">2 Oct 2026 00:00 UTC → 9 Oct 2026 00:00 UTC · Auto-refresh every 60s</div>
+
+<div class="tabs" id="tabs"></div>
+<div id="app"></div>
+
+<div class="card note">
+<b>Scoring:</b> daily top 5 = 10 / 8 / 6 / 4 / 2 points.
+Final score = 80% × average daily points + 20% × weekly points.
+PnL qualification requires at least 20,000 USDC weekly volume and positive weekly PnL.
+<br><br>
+<b>Data:</b> Volume is calculated from Hyperliquid executed fills. PnL uses Hyperliquid's portfolio PnL history at UTC boundaries. Hyperliquid states its portfolio graphs are sampled periodically, so PnL is an account/portfolio metric and should not be treated as tick-perfect accounting.
 </div>
-
-<section class="hero">
-  <div class="kicker">Competition</div>
-  <h2>7-Day Community Trading Competition</h2>
-  <p>Two independent streams · Volume & PnL · Final score based on daily + weekly points</p>
-  <div class="dates">
-    <div class="date"><b>02 Oct 2026 · 00:00 UTC</b><span>Start</span></div>
-    <div class="date"><b>09 Oct 2026 · 00:00 UTC</b><span>Finish</span></div>
-    <div class="date"><b>$1,500 USDC</b><span>Total prizes</span></div>
-  </div>
-  <div class="stats">
-    <div class="stat"><b>22</b><span>Traders</span></div>
-    <div class="stat"><b id="clock">—</b><span>UTC time</span></div>
-    <div class="stat"><b id="daysDone">0 / 7</b><span>Days recorded</span></div>
-  </div>
-</section>
-
-<div class="streams">
-  <button class="stream active" id="volBtn" onclick="setStream('volume')">📊 VOLUME · 1,000 USDC</button>
-  <button class="stream" id="pnlBtn" onclick="setStream('pnl')">💰 PnL · 500 USDC</button>
-</div>
-
-<div class="daytabs" id="days"></div>
-<div id="out"></div>
-
-<div class="footer"><span>Origami builder · 22 selected wallets</span><span>Auto-refresh: 30 seconds</span></div>
 </div>
 
 <script>
-const START=new Date("2026-10-02T00:00:00Z"), END=new Date("2026-10-09T00:00:00Z");
-let STREAM="volume", DAY="overall", STATE=null;
+let DATA=null;
+let currentTab="volume-week";
 
-const money=x=>Number(x||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
-const safe=s=>String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]));
-const short=a=>a.slice(0,6)+"..."+a.slice(-4);
-const avatar=(n,a)=>safe((n&&n!=="—"?n:a.slice(2,4)).slice(0,2).toUpperCase());
+const tabs=[
+ ["volume-week","Volume — Weekly"],
+ ["pnl-week","PnL — Weekly"],
+ ["volume-day-0","Volume — Oct 2"],
+ ["volume-day-1","Volume — Oct 3"],
+ ["volume-day-2","Volume — Oct 4"],
+ ["volume-day-3","Volume — Oct 5"],
+ ["volume-day-4","Volume — Oct 6"],
+ ["volume-day-5","Volume — Oct 7"],
+ ["volume-day-6","Volume — Oct 8"],
+ ["pnl-day-0","PnL — Oct 2"],
+ ["pnl-day-1","PnL — Oct 3"],
+ ["pnl-day-2","PnL — Oct 4"],
+ ["pnl-day-3","PnL — Oct 5"],
+ ["pnl-day-4","PnL — Oct 6"],
+ ["pnl-day-5","PnL — Oct 7"],
+ ["pnl-day-6","PnL — Oct 8"]
+];
 
-function setStream(s){STREAM=s;document.getElementById("volBtn").classList.toggle("active",s==="volume");document.getElementById("pnlBtn").classList.toggle("active",s==="pnl");render();}
-function setDay(d){DAY=d;document.querySelectorAll(".day").forEach(x=>x.classList.toggle("active",x.dataset.day===d));render();}
+function esc(x){
+ return String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
+}
+function money(x){
+ if(x===null||x===undefined)return '<span class="muted">—</span>';
+ return '$'+Number(x).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function signedMoney(x){
+ if(x===null||x===undefined)return '<span class="muted">—</span>';
+ let n=Number(x);
+ return '<span class="'+(n>=0?'green':'red')+'">'+(n>=0?'+':'')+money(n)+'</span>';
+}
+function render(){
+ const [metric,scope,idx]=currentTab.split("-");
+ let rows=DATA.wallets.map((r,i)=>{
+   let value,pts,score,status;
+   if(scope==="week"){
+     value=r.week[metric];
+     pts=r.week[metric+"_points"];
+     score=metric==="volume"?r.volume_final_score:r.pnl_final_score;
+     status=r.week.status;
+   }else{
+     const d=r.days[Number(idx)];
+     value=d[metric];
+     pts=d[metric+"_points"];
+     score=pts;
+     status=d.status;
+   }
+   return {...r,value,pts,score,status};
+ });
 
-function renderDays(){
-  const el=document.getElementById("days");
-  let h='<button class="day active" data-day="overall" onclick="setDay(\'overall\')">OVERALL</button>';
-  for(let i=0;i<7;i++){
-    const d=new Date(START.getTime()+i*86400000);
-    const key=d.toISOString().slice(0,10);
-    h+=`<button class="day" data-day="${key}" onclick="setDay('${key}')">DAY ${i+1}<br>${d.toLocaleDateString(undefined,{month:"short",day:"numeric",timeZone:"UTC"})}</button>`;
-  }
-  el.innerHTML=h;
+ rows.sort((a,b)=>{
+   if(scope==="week") return b.score-a.score;
+   return (b.value??-Infinity)-(a.value??-Infinity);
+ });
+
+ let title=metric==="volume"?"📊 Volume":"💰 PnL";
+ let subtitle=scope==="week"?"Weekly competition score":"Daily ranking";
+ let html='<div class="card"><h2>'+title+' · '+subtitle+'</h2><table><thead><tr>'+
+ '<th>#</th><th>Trader</th><th>'+title+'</th><th>Points</th>'+
+ (scope==="week"?'<th>Avg Daily</th><th>Final Score</th>':'<th>Status</th>')+
+ '</tr></thead><tbody>';
+
+ rows.forEach((r,i)=>{
+   html+='<tr>'+
+    '<td class="rank">'+(i+1)+'</td>'+
+    '<td><b>'+esc(r.name)+'</b><br><span class="muted">'+esc(r.wallet.slice(0,8)+'...'+r.wallet.slice(-6))+'</span></td>'+
+    '<td>'+(metric==="volume"?money(r.value):signedMoney(r.value))+'</td>'+
+    '<td><b>'+r.pts+'</b></td>'+
+    (scope==="week"
+      ? '<td>'+((metric==="volume"?r.volume_avg_daily:r.pnl_avg_daily).toFixed(2))+'</td><td><b>'+r.score.toFixed(2)+'</b></td>'
+      : '<td><span class="badge">'+esc(r.status)+'</span></td>')+
+   '</tr>';
+ });
+ html+='</tbody></table></div>';
+
+ if(scope==="week" && metric==="pnl"){
+   html+='<div class="card note"><b>PnL qualification:</b> weekly volume must be ≥ $20,000 and weekly PnL must be positive. Current qualification is shown by the underlying weekly data.</div>';
+ }
+ document.getElementById("app").innerHTML=html;
 }
 
-function render(){
-  if(!STATE)return;
-  document.getElementById("clock").textContent=new Date().toISOString().slice(11,19);
-  document.getElementById("daysDone").textContent=STATE.days_done+" / 7";
-
-  const arr=STREAM==="volume"?STATE.volume:STATE.pnl;
-  let rows=arr;
-
-  if(DAY!=="overall"){
-    const d=STATE.days[DAY];
-    rows=arr.map(x=>{
-      const q=d?.[x.wallet]||{volume:0,pnl:0,points:0};
-      return {...x,metric:STREAM==="volume"?q.volume:q.pnl,dayPoints:STREAM==="volume"?q.volume_points:q.pnl_points};
-    }).sort((a,b)=>b.metric-a.metric);
-  }
-
-  const title=STREAM==="volume"?"Volume Leaderboard":"PnL Leaderboard";
-  const metric=STREAM==="volume"?"Executed Volume":"Net PnL";
-  let head=DAY==="overall"?
-    `<th>Daily Avg</th><th>Weekly Pts</th><th>Final Score</th><th>${metric}</th>`:
-    `<th>Points</th><th>${metric}</th><th>Daily Rank</th>`;
-
-  let body=rows.map((x,i)=>{
-    const value=DAY==="overall"?(STREAM==="volume"?x.volume:x.pnl):x.metric;
-    const score=DAY==="overall"?(STREAM==="volume"?x.final_score:x.final_score):x.dayPoints;
-    const positive=value>=0;
-    return `<tr>
-      <td><span class="rank ${i<3?"top":""}">${i<3?["🥇","🥈","🥉"][i]:i+1}</span></td>
-      <td><div class="trader"><div class="avatar">${avatar(x.username,x.wallet)}</div><div><div class="name">${safe(x.username||"Anonymous Trader")}</div><div class="wallet">${short(x.wallet)}</div></div></div></td>
-      ${DAY==="overall"
-        ? `<td class="num">${money(STREAM==="volume"?x.avg_daily:x.avg_daily)}</td><td class="num">${x.weekly_points}</td><td class="score">${score.toFixed(2)}</td><td class="${STREAM==="pnl"?(positive?"pos":"neg"):"num"}">${STREAM==="pnl"?(positive?"+":"-")+"$"+money(Math.abs(value)):"$"+money(value)}</td>`
-        : `<td class="score">${score}</td><td class="${STREAM==="pnl"?(positive?"pos":"neg"):"num"}">${STREAM==="pnl"?(positive?"+":"-")+"$"+money(Math.abs(value)):"$"+money(value)}</td><td class="num">#${i+1}</td>`}
-    </tr>`;
-  }).join("");
-
-  document.getElementById("out").innerHTML=`
-  <section class="panel">
-    <div class="panelHead"><h3>${title} · ${DAY==="overall"?"FINAL SCORING":"DAY "+(Object.keys(STATE.days).indexOf(DAY)+1)}</h3><span>${DAY==="overall"?"80% daily average + 20% weekly points":"10 / 8 / 6 / 4 / 2 points"}</span></div>
-    <table><thead><tr><th>Rank</th><th>Trader</th>${head}</tr></thead><tbody>${body}</tbody></table>
-  </section>
-  <div class="note">
-    ${STREAM==="volume"
-      ?"Volume stream: both opening and closing trades count. Profitability does not affect eligibility."
-      :"PnL stream: only positive daily PnL earns daily points. Final PnL qualification requires at least $20,000 weekly volume and positive weekly net PnL."}
-  </div>`;
+function renderTabs(){
+ document.getElementById("tabs").innerHTML=tabs.map(t=>
+   '<button class="'+(t[0]===currentTab?'active':'')+'" onclick="currentTab=\''+t[0]+'\';renderTabs();render()">'+t[1]+'</button>'
+ ).join("");
 }
 
 async function load(){
-  try{
-    const r=await fetch("/state?x="+Date.now());
-    if(!r.ok)throw new Error("Leaderboard data request failed.");
-    STATE=await r.json();render();
-  }catch(e){document.getElementById("out").innerHTML=`<div class="err">${safe(e.message)}</div>`}
+ try{
+  const r=await fetch('/data?t='+Date.now(),{cache:'no-store'});
+  DATA=await r.json();
+  renderTabs(); render();
+ }catch(e){
+  document.getElementById("app").innerHTML='<div class="card">Data temporarily unavailable. Retrying…</div>';
+ }
 }
-renderDays();load();setInterval(load,30000);
+load();
+setInterval(load,60000);
 </script>
 </body>
-</html>"""
+</html>
+"""
 
-
-# ============================================================
-# HTTP SERVER
-# ============================================================
 
 class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.startswith("/state"):
-            try:
-                days, volume_rank, pnl_rank = build_standings()
-                now=datetime.now(timezone.utc)
-                out_days={}
-                done=0
-                for i in range(7):
-                    day=(START.date()+timedelta(days=i)).isoformat()
-                    if any(v["captured_at"] for v in days[day].values()):
-                        done+=1
-                    vals_v={w:days[day][w]["volume"] for w in WALLETS}
-                    vals_p={w:days[day][w]["pnl"] for w in WALLETS}
-                    vp=rank_points(vals_v)
-                    pp=rank_points(vals_p,positive_only=True)
-                    out_days[day]={}
-                    for w in WALLETS:
-                        out_days[day][w]={
-                            "volume":vals_v[w],
-                            "pnl":vals_p[w],
-                            "volume_points":vp[w],
-                            "pnl_points":pp[w]
-                        }
-                def pack(rows, stream):
-                    result=[]
-                    for x in rows:
-                        result.append({
-                            "wallet":x["wallet"],"username":x["username"],
-                            "volume":x["volume"],"pnl":x["pnl"],
-                            "avg_daily":x["volume_avg_daily"] if stream=="volume" else x["pnl_avg_daily"],
-                            "weekly_points":x["volume_weekly_points"] if stream=="volume" else x["pnl_weekly_points"],
-                            "final_score":x["volume_final_score"] if stream=="volume" else x["pnl_final_score"],
-                            "qualified":True if stream=="volume" else x["pnl_qualified"]
-                        })
-                    return result
-                payload={
-                    "now":now.isoformat(),
-                    "days_done":done,
-                    "volume":pack(volume_rank,"volume"),
-                    "pnl":pack(pnl_rank,"pnl"),
-                    "days":out_days
-                }
-                raw=json.dumps(payload).encode()
-                self.send_response(200);self.send_header("Content-Type","application/json");self.send_header("Cache-Control","no-store");self.end_headers();self.wfile.write(raw)
-            except Exception as e:
-                self.send_response(500);self.send_header("Content-Type","text/plain");self.end_headers();self.wfile.write(str(e).encode())
-        else:
-            self.send_response(200);self.send_header("Content-Type","text/html; charset=utf-8");self.end_headers();self.wfile.write(HTML.encode())
+    def send_text(self, status, content, content_type="text/html; charset=utf-8"):
+        raw = content.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
 
-    def log_message(self, format, *args):
+    def do_GET(self):
+        try:
+            if self.path.startswith("/data"):
+                payload = build_payload()
+                self.send_text(
+                    200,
+                    json.dumps(payload, separators=(",", ":")),
+                    "application/json; charset=utf-8",
+                )
+            else:
+                self.send_text(200, HTML)
+        except Exception as e:
+            print("ERROR:", repr(e), flush=True)
+            self.send_text(
+                500,
+                json.dumps({"error": str(e)}),
+                "application/json; charset=utf-8",
+            )
+
+    def log_message(self, fmt, *args):
         return
 
-HOST="0.0.0.0"
-PORT=int(os.environ.get("PORT","8765"))
-server=HTTPServer((HOST,PORT),Handler)
 
-if "PORT" not in os.environ:
-    import webbrowser
-    threading.Timer(1,lambda:webbrowser.open(f"http://127.0.0.1:{PORT}")).start()
-
-print(f"Starting Origami competition leaderboard on {HOST}:{PORT}")
-print("Competition: 2 Oct 2026 00:00 UTC -> 9 Oct 2026 00:00 UTC")
-print("Refresh: 30 seconds")
-
-try:
+def main():
+    port = int(os.environ.get("PORT", "8765"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    print("Hyperliquid competition leaderboard running on port", port, flush=True)
     server.serve_forever()
-except KeyboardInterrupt:
-    server.server_close()
+
+
+if __name__ == "__main__":
+    main()
