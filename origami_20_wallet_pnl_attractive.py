@@ -44,46 +44,69 @@ DB = db()
 # DATA HELPERS
 # ============================================================
 
-def find_users(data, tf="24h"):
-    raw = None
-    if isinstance(data, dict):
-        if isinstance(data.get("users"), dict):
-            raw = data["users"].get(tf)
-        if raw is None and isinstance(data.get(tf), dict):
-            raw = data[tf].get("users")
-    if raw is None:
-        # Recursive fallback
-        def walk(x):
-            if not isinstance(x, dict):
-                return None
-            if tf in x and isinstance(x[tf], (list, dict)):
-                return x[tf]
-            for v in x.values():
-                r = walk(v)
-                if r is not None:
-                    return r
+def norm_address(value):
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if len(value) == 42 and value.startswith("0x"):
+        try:
+            int(value[2:], 16)
+            return value.lower()
+        except ValueError:
             return None
-        raw = walk(data)
-    return normalize_users(raw)
+    return None
 
-def normalize_users(raw):
-    out = {}
-    if isinstance(raw, list):
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            a = item.get("address") or item.get("user") or item.get("wallet") or item.get("addr")
-            if isinstance(a, str) and len(a) == 42:
-                out[a.lower()] = item
-    elif isinstance(raw, dict):
-        for k, v in raw.items():
-            if isinstance(k, str) and len(k) == 42 and k.startswith("0x"):
-                out[k.lower()] = v or {}
-            elif isinstance(v, dict):
-                a = v.get("address") or v.get("user") or v.get("wallet") or v.get("addr")
-                if isinstance(a, str) and len(a) == 42:
-                    out[a.lower()] = v
-    return out
+
+def extract_wallet_records(section):
+    records = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            address = None
+            for key in ("address", "user", "wallet", "account"):
+                candidate = norm_address(node.get(key))
+                if candidate:
+                    address = candidate
+                    break
+
+            if address:
+                records.append((address, node))
+
+            for value in node.values():
+                walk(value)
+
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(section)
+    return records
+
+
+def find_users(data, tf="24h"):
+    candidates = []
+
+    def search_timeframe(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if str(key).lower() == tf.lower():
+                    extracted = extract_wallet_records(value)
+                    if extracted:
+                        candidates.extend(extracted)
+                search_timeframe(value)
+
+        elif isinstance(node, list):
+            for item in node:
+                search_timeframe(item)
+
+    search_timeframe(data)
+
+    result = {}
+    for address, record in candidates:
+        result[address] = record
+
+    return result
+
 
 def num(obj, names):
     for n in names:
@@ -95,7 +118,7 @@ def num(obj, names):
     return 0.0
 
 def fetch_24h():
-    r = requests.get(DATA_URL, timeout=30)
+    r = requests.get(DATA_URL + ("&" if "?" in DATA_URL else "?") + "_ts=" + str(int(time.time())), timeout=30)
     r.raise_for_status()
     return find_users(r.json(), "24h")
 
@@ -155,6 +178,9 @@ def snapshot_loop():
             users = latest_users()
             if users:
                 capture_finished_days(users)
+                print(f"CMM 24h users loaded: {len(users)}")
+            else:
+                print("WARNING: CMM 24h users loaded: 0")
         except Exception:
             pass
         time.sleep(REFRESH_SECONDS)
