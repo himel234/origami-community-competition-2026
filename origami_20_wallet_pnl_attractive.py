@@ -256,7 +256,7 @@ def build_standings():
 # ============================================================
 
 
-HTML = r"""<!doctype html>
+HTML = r'''<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
