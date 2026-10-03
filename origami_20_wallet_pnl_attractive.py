@@ -344,4 +344,131 @@ function render(){
   document.getElementById("clock").textContent=new Date().toISOString().slice(11,19);
   document.getElementById("daysDone").textContent=STATE.days_done+" / 7";
 
-  c
+  const arr=STREAM==="volume"?STATE.volume:STATE.pnl;
+  let rows=arr;
+
+  if(DAY!=="overall"){
+    const d=STATE.days[DAY];
+    rows=arr.map(x=>{
+      const q=d?.[x.wallet]||{volume:0,pnl:0,points:0};
+      return {...x,metric:STREAM==="volume"?q.volume:q.pnl,dayPoints:STREAM==="volume"?q.volume_points:q.pnl_points};
+    }).sort((a,b)=>b.metric-a.metric);
+  }
+
+  const title=STREAM==="volume"?"Volume Leaderboard":"PnL Leaderboard";
+  const metric=STREAM==="volume"?"Executed Volume":"Net PnL";
+  let head=DAY==="overall"?
+    `<th>Daily Avg</th><th>Weekly Pts</th><th>Final Score</th><th>${metric}</th>`:
+    `<th>Points</th><th>${metric}</th><th>Daily Rank</th>`;
+
+  let body=rows.map((x,i)=>{
+    const value=DAY==="overall"?(STREAM==="volume"?x.volume:x.pnl):x.metric;
+    const score=DAY==="overall"?(STREAM==="volume"?x.final_score:x.final_score):x.dayPoints;
+    const positive=value>=0;
+    return `<tr>
+      <td><span class="rank ${i<3?"top":""}">${i<3?["🥇","🥈","🥉"][i]:i+1}</span></td>
+      <td><div class="trader"><div class="avatar">${avatar(x.username,x.wallet)}</div><div><div class="name">${safe(x.username||"Anonymous Trader")}</div><div class="wallet">${short(x.wallet)}</div></div></div></td>
+      ${DAY==="overall"
+        ? `<td class="num">${money(STREAM==="volume"?x.avg_daily:x.avg_daily)}</td><td class="num">${x.weekly_points}</td><td class="score">${score.toFixed(2)}</td><td class="${STREAM==="pnl"?(positive?"pos":"neg"):"num"}">${STREAM==="pnl"?(positive?"+":"-")+"$"+money(Math.abs(value)):"$"+money(value)}</td>`
+        : `<td class="score">${score}</td><td class="${STREAM==="pnl"?(positive?"pos":"neg"):"num"}">${STREAM==="pnl"?(positive?"+":"-")+"$"+money(Math.abs(value)):"$"+money(value)}</td><td class="num">#${i+1}</td>`}
+    </tr>`;
+  }).join("");
+
+  document.getElementById("out").innerHTML=`
+  <section class="panel">
+    <div class="panelHead"><h3>${title} · ${DAY==="overall"?"FINAL SCORING":"DAY "+(Object.keys(STATE.days).indexOf(DAY)+1)}</h3><span>${DAY==="overall"?"80% daily average + 20% weekly points":"10 / 8 / 6 / 4 / 2 points"}</span></div>
+    <table><thead><tr><th>Rank</th><th>Trader</th>${head}</tr></thead><tbody>${body}</tbody></table>
+  </section>
+  <div class="note">
+    ${STREAM==="volume"
+      ?"Volume stream: both opening and closing trades count. Profitability does not affect eligibility."
+      :"PnL stream: only positive daily PnL earns daily points. Final PnL qualification requires at least $20,000 weekly volume and positive weekly net PnL."}
+  </div>`;
+}
+
+async function load(){
+  try{
+    const r=await fetch("/state?x="+Date.now());
+    if(!r.ok)throw new Error("Leaderboard data request failed.");
+    STATE=await r.json();render();
+  }catch(e){document.getElementById("out").innerHTML=`<div class="err">${safe(e.message)}</div>`}
+}
+renderDays();load();setInterval(load,30000);
+</script>
+</body>
+</html>"""
+
+
+# ============================================================
+# HTTP SERVER
+# ============================================================
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/state"):
+            try:
+                days, volume_rank, pnl_rank = build_standings()
+                now=datetime.now(timezone.utc)
+                out_days={}
+                done=0
+                for i in range(7):
+                    day=(START.date()+timedelta(days=i)).isoformat()
+                    if any(v["captured_at"] for v in days[day].values()):
+                        done+=1
+                    vals_v={w:days[day][w]["volume"] for w in WALLETS}
+                    vals_p={w:days[day][w]["pnl"] for w in WALLETS}
+                    vp=rank_points(vals_v)
+                    pp=rank_points(vals_p,positive_only=True)
+                    out_days[day]={}
+                    for w in WALLETS:
+                        out_days[day][w]={
+                            "volume":vals_v[w],
+                            "pnl":vals_p[w],
+                            "volume_points":vp[w],
+                            "pnl_points":pp[w]
+                        }
+                def pack(rows, stream):
+                    result=[]
+                    for x in rows:
+                        result.append({
+                            "wallet":x["wallet"],"username":x["username"],
+                            "volume":x["volume"],"pnl":x["pnl"],
+                            "avg_daily":x["volume_avg_daily"] if stream=="volume" else x["pnl_avg_daily"],
+                            "weekly_points":x["volume_weekly_points"] if stream=="volume" else x["pnl_weekly_points"],
+                            "final_score":x["volume_final_score"] if stream=="volume" else x["pnl_final_score"],
+                            "qualified":True if stream=="volume" else x["pnl_qualified"]
+                        })
+                    return result
+                payload={
+                    "now":now.isoformat(),
+                    "days_done":done,
+                    "volume":pack(volume_rank,"volume"),
+                    "pnl":pack(pnl_rank,"pnl"),
+                    "days":out_days
+                }
+                raw=json.dumps(payload).encode()
+                self.send_response(200);self.send_header("Content-Type","application/json");self.send_header("Cache-Control","no-store");self.end_headers();self.wfile.write(raw)
+            except Exception as e:
+                self.send_response(500);self.send_header("Content-Type","text/plain");self.end_headers();self.wfile.write(str(e).encode())
+        else:
+            self.send_response(200);self.send_header("Content-Type","text/html; charset=utf-8");self.end_headers();self.wfile.write(HTML.encode())
+
+    def log_message(self, format, *args):
+        return
+
+HOST="0.0.0.0"
+PORT=int(os.environ.get("PORT","8765"))
+server=HTTPServer((HOST,PORT),Handler)
+
+if "PORT" not in os.environ:
+    import webbrowser
+    threading.Timer(1,lambda:webbrowser.open(f"http://127.0.0.1:{PORT}")).start()
+
+print(f"Starting Origami competition leaderboard on {HOST}:{PORT}")
+print("Competition: 2 Oct 2026 00:00 UTC -> 9 Oct 2026 00:00 UTC")
+print("Refresh: 30 seconds")
+
+try:
+    server.serve_forever()
+except KeyboardInterrupt:
+    server.server_close()
