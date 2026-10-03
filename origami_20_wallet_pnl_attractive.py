@@ -49,6 +49,7 @@ WALLETS = [
     "0x8a591916b925c399a4d2791d186dfae5366cc12a",
     "0xec3c5055f1d402e41c9974fb8291265e087baa9c",
     "0xbe017f5edc123d52572be3743e3e136fccd4c484",
+    "0x9701d4d5b1910462354368bb0f7bc31dac0e601a",
 ]
 
 USERNAMES = {
@@ -112,7 +113,7 @@ def normalize_list(data):
 
 def fetch_builder_fills(start, end):
     # HyperTracker fills supports multiple address parameters and max 24h windows.
-    # 24 wallets are therefore fetched in 3 CMM requests: 10 + 10 + 4.
+    # 25 wallets are therefore fetched in 3 CMM requests: 10 + 10 + 4.
     results=[]
     if end <= start:
         return results
@@ -432,7 +433,7 @@ th{font-size:12px;color:#8993a5;text-transform:uppercase}.right{text-align:right
 <div class="hero">
 <div>
 <h1>Origami Community Trading Competition</h1>
-<div class="muted">2 Oct 2026 00:00 UTC → 9 Oct 2026 00:00 UTC · 24 wallets</div>
+<div class="muted">2 Oct 2026 00:00 UTC → 9 Oct 2026 00:00 UTC · 25 wallets</div>
 </div>
 <div id="status" class="muted">Loading…</div>
 </div>
