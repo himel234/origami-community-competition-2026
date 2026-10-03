@@ -59,6 +59,8 @@ WALLETS = [
     "0x94aa8c596c405ac056e5caa2f08870c947a98e2a",
     "0x7f2663fc903d269a9670ce5ad76d92f7a0b70e66",
     "0x8a591916b925c399a4d2791d186dfae5366cc12a",
+    "0xec3c5055f1d402e41c9974fb8291265e087baa9c",
+    "0xBe017F5EDc123D52572BE3743e3E136FcCd4C484",
 ]
 
 USERNAMES = {
@@ -84,6 +86,8 @@ USERNAMES = {
     WALLETS[19]: "",
     WALLETS[20]: "@Safal818",
     WALLETS[21]: "@Eleonore3663",
+    WALLETS[22]: "",
+    WALLETS[23]: "",
 }
 
 session = requests.Session()
