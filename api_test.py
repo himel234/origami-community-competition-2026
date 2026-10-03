@@ -23,14 +23,18 @@ headers = {
 params = {
     "start": "2026-10-02T00:00:00.000Z",
     "end": "2026-10-02T01:00:00.000Z",
-    "address": WALLET,
+    "address": [WALLET],
     "fillType": "perp",
     "limit": 10,
 }
 
-print("Testing HyperTracker API...")
+print("======================================")
+print("Testing HyperTracker API")
+print("======================================")
 print("Builder:", BUILDER)
 print("Wallet:", WALLET)
+print("Time:", params["start"], "->", params["end"])
+print()
 
 try:
     response = requests.get(
@@ -41,6 +45,7 @@ try:
     )
 
     print("HTTP STATUS:", response.status_code)
+    print()
     print("RESPONSE:")
     print(response.text[:10000])
 
