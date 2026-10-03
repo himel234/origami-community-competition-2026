@@ -1,474 +1,636 @@
-import os, json, sqlite3, threading, time
+
+import json
+import os
+import sqlite3
+import threading
+import time
 from datetime import datetime, timezone, timedelta
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import requests
 
 # ============================================================
-# HYPERLIQUID COMMUNITY TRADING COMPETITION
-# 2 Oct 2026 00:00 UTC -> 9 Oct 2026 00:00 UTC
+# SIMPLE ORIGAMI COMPETITION LEADERBOARD
+# ============================================================
+# Source: CoinMarketMan HyperTracker public Origami builder data
+# Builder: 0x9b451f8941240db8bedc99bff8917a2ed9550074
+#
+# Daily tabs:
+#   - use CMM 24h data for the CURRENT competition day
+#   - save that 24h data at each 00:00 UTC cutoff
+#
+# Weekly:
+#   - use CMM 7d data directly
+#
+# This is intentionally kept simple, like the previous leaderboard.
 # ============================================================
 
-DATA_URL = "https://dw3ji7n7thadj.cloudfront.net/aggregator/builders/0x9b451f8941240db8bedc99bff8917a2ed9550074_v2.json"
+DATA_URL = (
+    "https://dw3ji7n7thadj.cloudfront.net/aggregator/builders/"
+    "0x9b451f8941240db8bedc99bff8917a2ed9550074_v2.json"
+)
+
 START = datetime(2026, 10, 2, 0, 0, tzinfo=timezone.utc)
-END   = datetime(2026, 10, 9, 0, 0, tzinfo=timezone.utc)
+END = datetime(2026, 10, 9, 0, 0, tzinfo=timezone.utc)
+
 REFRESH_SECONDS = 30
 DB_FILE = "origami_competition.sqlite3"
 
-WALLETS = ["0x28d6dda751db999b991ed169bb773e8e855c36c2", "0x6188c0c04bd502541b77d8cd43667944437b3eda", "0x6e5234204cd2015baf121b6934eab4d4f40a07ce", "0xfff111cdc96472c137596a91d001fd870557501c", "0x14280d8e1a1e490a3665563479e581280d32e441", "0xfcb4dbcb3dbe57f02f4a5fa603a1da948f549673", "0xbfbbb7a23d740648547f11797de7c157af81cac8", "0xbf787b37c4db340088b154e3c343f4d94508ac8c", "0x7e2df435ffaa20800713a1f1e770c1b093bacda5", "0xe254c53e776bb1b434f9d81bc93c246d08069bd6", "0x097e0a249c065e279ec08ea021cff3dd11c32d41", "0x8c641e56994b18b18d9bc754655c2892b80b3315", "0xb29b8367e3a07928d5aa788bd9137d8c416e65ae", "0x6f23925a69097b2ac7bf67e24b68cbb6382ca656", "0x28a97f53f11becbb1d531ed26a953cba87d115c8", "0x03a506eb9548fd844f60e65b35e56e5472f70c00", "0x4137bff4666989e877ade32e09ba8035cb0b1359", "0x88a30b45ca1fe48898675c6e4420b0090b0eba5e", "0x779c0a1345375b21839e4053419d9fdd6a432cce", "0x94aa8c596c405ac056e5caa2f08870c947a98e2a", "0x7f2663fc903d269a9670ce5ad76d92f7a0b70e66", "0x8a591916b925c399a4d2791d186dfae5366cc12a"]
-USERNAMES = {"0x28d6dda751db999b991ed169bb773e8e855c36c2": "@shamim215", "0x6188c0c04bd502541b77d8cd43667944437b3eda": "@puperet", "0x6e5234204cd2015baf121b6934eab4d4f40a07ce": "", "0xfff111cdc96472c137596a91d001fd870557501c": "@BARYSBYEK", "0x14280d8e1a1e490a3665563479e581280d32e441": "", "0xfcb4dbcb3dbe57f02f4a5fa603a1da948f549673": "@himel234", "0xbfbbb7a23d740648547f11797de7c157af81cac8": "", "0xbf787b37c4db340088b154e3c343f4d94508ac8c": "@tomtop", "0x7e2df435ffaa20800713a1f1e770c1b093bacda5": "", "0xe254c53e776bb1b434f9d81bc93c246d08069bd6": "", "0x097e0a249c065e279ec08ea021cff3dd11c32d41": "@abshamweb3", "0x8c641e56994b18b18d9bc754655c2892b80b3315": "", "0xb29b8367e3a07928d5aa788bd9137d8c416e65ae": "@madikpeju", "0x6f23925a69097b2ac7bf67e24b68cbb6382ca656": "", "0x28a97f53f11becbb1d531ed26a953cba87d115c8": "@Edward6742", "0x03a506eb9548fd844f60e65b35e56e5472f70c00": "", "0x4137bff4666989e877ade32e09ba8035cb0b1359": "", "0x88a30b45ca1fe48898675c6e4420b0090b0eba5e": "", "0x779c0a1345375b21839e4053419d9fdd6a432cce": "", "0x94aa8c596c405ac056e5caa2f08870c947a98e2a": "", "0x7f2663fc903d269a9670ce5ad76d92f7a0b70e66": "@Safal818", "0x8a591916b925c399a4d2791d186dfae5366cc12a": "@Eleonore3663"}
+WALLETS = [
+    "0x28d6dda751db999b991ed169bb773e8e855c36c2",
+    "0x6188c0c04bd502541b77d8cd43667944437b3eda",
+    "0x6e5234204cd2015baf121b6934eab4d4f40a07ce",
+    "0xfff111cdc96472c137596a91d001fd870557501c",
+    "0x14280d8e1a1e490a3665563479e581280d32e441",
+    "0xfcb4dbcb3dbe57f02f4a5fa603a1da948f549673",
+    "0xbfbbb7a23d740648547f11797de7c157af81cac8",
+    "0xbf787b37c4db340088b154e3c343f4d94508ac8c",
+    "0x7e2df435ffaa20800713a1f1e770c1b093bacda5",
+    "0xe254c53e776bb1b434f9d81bc93c246d08069bd6",
+    "0x097e0a249c065e279ec08ea021cff3dd11c32d41",
+    "0x8c641e56994b18b18d9bc754655c2892b80b3315",
+    "0xb29b8367e3a07928d5aa788bd9137d8c416e65ae",
+    "0x6f23925a69097b2ac7bf67e24b68cbb6382ca656",
+    "0x28a97f53f11becbb1d531ed26a953cba87d115c8",
+    "0x03a506eb9548fd844f60e65b35e56e5472f70c00",
+    "0x4137bff4666989e877ade32e09ba8035cb0b1359",
+    "0x88a30b45ca1fe48898675c6e4420b0090b0eba5e",
+    "0x779c0a1345375b21839e4053419d9fdd6a432cce",
+    "0x94aa8c596c405ac056e5caa2f08870c947a98e2a",
+    "0x7f2663fc903d269a9670ce5ad76d92f7a0b70e66",
+    "0x8a591916b925c399a4d2791d186dfae5366cc12a",
+]
 
-POINTS = [10, 8, 6, 4, 2]
+USERNAMES = {
+    WALLETS[0]: "@shamim215",
+    WALLETS[1]: "@puperet",
+    WALLETS[2]: "",
+    WALLETS[3]: "@BARYSBYEK",
+    WALLETS[4]: "",
+    WALLETS[5]: "@himel234",
+    WALLETS[6]: "",
+    WALLETS[7]: "@tomtop",
+    WALLETS[8]: "",
+    WALLETS[9]: "",
+    WALLETS[10]: "@abshamweb3",
+    WALLETS[11]: "",
+    WALLETS[12]: "@madikpeju",
+    WALLETS[13]: "",
+    WALLETS[14]: "@Edward6742",
+    WALLETS[15]: "",
+    WALLETS[16]: "",
+    WALLETS[17]: "",
+    WALLETS[18]: "",
+    WALLETS[19]: "",
+    WALLETS[20]: "@Safal818",
+    WALLETS[21]: "@Eleonore3663",
+}
 
-# ============================================================
-# DATABASE
-# ============================================================
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Origami-Community-Competition/1.0",
+    "Accept": "application/json",
+})
 
-def db():
-    con = sqlite3.connect(DB_FILE, check_same_thread=False)
+lock = threading.Lock()
+cache = {"time": 0, "data": None}
+
+
+def fetch():
+    with lock:
+        if cache["data"] is not None and time.time() - cache["time"] < 20:
+            return cache["data"]
+
+        last = None
+        for attempt in range(4):
+            try:
+                r = session.get(DATA_URL, timeout=20)
+                r.raise_for_status()
+                data = r.json()
+                cache["data"] = data
+                cache["time"] = time.time()
+                return data
+            except Exception as e:
+                last = e
+                time.sleep(1 + attempt)
+
+        raise RuntimeError(str(last))
+
+
+def find_timeframe(data, timeframe):
+    """
+    Handles the CMM JSON structures used by the previous leaderboard.
+    """
+    users = data.get("users") if isinstance(data, dict) else None
+
+    if isinstance(users, dict):
+        x = users.get(timeframe)
+        if x is not None:
+            return x
+
+    x = data.get(timeframe) if isinstance(data, dict) else None
+
+    if isinstance(x, dict) and "users" in x:
+        return x["users"]
+
+    return x if x is not None else []
+
+
+def wallet_map(data, timeframe):
+    raw = find_timeframe(data, timeframe)
+    result = {}
+
+    if isinstance(raw, dict):
+        for key, item in raw.items():
+            if not isinstance(item, dict):
+                continue
+
+            address = key
+            if not address.lower().startswith("0x"):
+                address = item.get("address") or item.get("user") or ""
+
+            if isinstance(address, str) and address.lower().startswith("0x"):
+                result[address.lower()] = item
+
+    elif isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+
+            address = (
+                item.get("address")
+                or item.get("user")
+                or item.get("wallet", {}).get("address", "")
+            )
+
+            if isinstance(address, str) and address.lower().startswith("0x"):
+                result[address.lower()] = item
+
+    return result
+
+
+def num(item, *keys):
+    for key in keys:
+        try:
+            if item.get(key) is not None:
+                return float(item[key])
+        except Exception:
+            pass
+    return 0.0
+
+
+def extract(data, timeframe):
+    users = wallet_map(data, timeframe)
+    result = {}
+
+    for wallet in WALLETS:
+        item = users.get(wallet.lower())
+
+        if item is None:
+            result[wallet] = {
+                "volume": 0.0,
+                "pnl": 0.0,
+                "found": False,
+            }
+        else:
+            result[wallet] = {
+                "volume": num(item, "volume"),
+                "pnl": num(item, "pnl"),
+                "found": True,
+            }
+
+    return result
+
+
+def init_db():
+    con = sqlite3.connect(DB_FILE)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS daily_snapshots (
+        CREATE TABLE IF NOT EXISTS daily (
             day TEXT NOT NULL,
             wallet TEXT NOT NULL,
             volume REAL NOT NULL,
             pnl REAL NOT NULL,
             captured_at TEXT NOT NULL,
-            locked INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(day, wallet)
         )
     """)
-    # Upgrade databases made by the earlier version.
-    cols = {r[1] for r in con.execute("PRAGMA table_info(daily_snapshots)").fetchall()}
-    if "locked" not in cols:
-        con.execute("ALTER TABLE daily_snapshots ADD COLUMN locked INTEGER NOT NULL DEFAULT 0")
     con.commit()
-    return con
+    con.close()
 
-DB = db()
 
-# ============================================================
-# DATA HELPERS
-# ============================================================
+def save_day(day, rows):
+    con = sqlite3.connect(DB_FILE)
+    now = datetime.now(timezone.utc).isoformat()
 
-def find_users(data, tf="24h"):
-    raw = None
-    if isinstance(data, dict):
-        if isinstance(data.get("users"), dict):
-            raw = data["users"].get(tf) or data["users"].get(tf.lower())
-        if raw is None and isinstance(data.get(tf), dict):
-            raw = data[tf].get("users")
-    if raw is None:
-        def walk(x):
-            if not isinstance(x, dict): return None
-            for key in (tf, tf.lower()):
-                if key in x and isinstance(x[key], (list, dict)): return x[key]
-            for v in x.values():
-                r = walk(v)
-                if r is not None: return r
-            return None
-        raw = walk(data)
-    return normalize_users(raw)
+    for wallet in WALLETS:
+        x = rows[wallet]
+        con.execute("""
+            INSERT OR REPLACE INTO daily
+            (day, wallet, volume, pnl, captured_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (day, wallet, x["volume"], x["pnl"], now))
 
-def normalize_users(raw):
-    out = {}
-    if isinstance(raw, list):
-        for item in raw:
-            if not isinstance(item, dict): continue
-            a=item.get("address") or item.get("user") or item.get("wallet") or item.get("addr")
-            if isinstance(a,str) and a.lower().startswith("0x"):
-                out[a.lower()]=item
-    elif isinstance(raw, dict):
-        for k,v in raw.items():
-            if isinstance(k,str) and k.lower().startswith("0x"):
-                out[k.lower()] = v if isinstance(v,dict) else {}
-            elif isinstance(v,dict):
-                a=v.get("address") or v.get("user") or v.get("wallet") or v.get("addr")
-                if isinstance(a,str) and a.lower().startswith("0x"):
-                    out[a.lower()]=v
-    return out
+    con.commit()
+    con.close()
 
-def num(obj, names):
-    for n in names:
-        if isinstance(obj,dict) and obj.get(n) is not None:
-            try: return float(obj[n])
-            except: pass
-    return 0.0
 
-def fetch_users(tf="24h"):
-    r=requests.get(DATA_URL,timeout=30)
-    r.raise_for_status()
-    return find_users(r.json(),tf)
+def read_day(day):
+    con = sqlite3.connect(DB_FILE)
+    rows = con.execute("""
+        SELECT wallet, volume, pnl, captured_at
+        FROM daily
+        WHERE day=?
+    """, (day,)).fetchall()
+    con.close()
 
-# ============================================================
-# DAILY CAPTURE / LOCKING
-#
-# IMPORTANT: The active day's rolling 1D value is saved repeatedly
-# DURING that day. At 00:00 UTC the previous day's last saved value
-# is locked and can never be overwritten.
-# ============================================================
+    return {
+        wallet: {
+            "volume": volume,
+            "pnl": pnl,
+            "captured_at": captured,
+        }
+        for wallet, volume, pnl, captured in rows
+    }
 
-def competition_day(now):
-    if now < START or now >= END: return None
-    return (now.date()-START.date()).days
 
-def save_live_day(day_index, users):
-    if not 0 <= day_index <= 6: return
-    day=(START.date()+timedelta(days=day_index)).isoformat()
-    captured=datetime.now(timezone.utc).isoformat()
-    with DB:
-        for w in WALLETS:
-            u=users.get(w.lower(),{})
-            DB.execute("""
-                INSERT INTO daily_snapshots(day,wallet,volume,pnl,captured_at,locked)
-                VALUES(?,?,?,?,?,0)
-                ON CONFLICT(day,wallet) DO UPDATE SET
-                    volume=excluded.volume,
-                    pnl=excluded.pnl,
-                    captured_at=excluded.captured_at
-                WHERE daily_snapshots.locked=0
-            """,(day,w.lower(),num(u,["volume"]),num(u,["pnl"]),captured))
+def day_label(i):
+    return (START + timedelta(days=i)).strftime("%Y-%m-%d")
 
-def lock_finished_days():
-    now=datetime.now(timezone.utc)
-    with DB:
-        for i in range(7):
-            cutoff=START+timedelta(days=i+1)
-            if now>=cutoff:
-                day=(START.date()+timedelta(days=i)).isoformat()
-                DB.execute("UPDATE daily_snapshots SET locked=1 WHERE day=?",(day,))
 
-def daily_snapshot_status(day_index):
-    day=(START.date()+timedelta(days=day_index)).isoformat()
-    return DB.execute("SELECT COUNT(*),SUM(locked) FROM daily_snapshots WHERE day=?",(day,)).fetchone()
+def current_day_index(now):
+    if now < START or now >= END:
+        return None
 
-def snapshot_loop():
+    return (now.date() - START.date()).days
+
+
+def snapshot_worker():
+    """
+    At every UTC cutoff:
+      00:00 Oct 3 -> save Oct 2's last 24h snapshot
+      00:00 Oct 4 -> save Oct 3's last 24h snapshot
+      ...
+    """
     while True:
         try:
-            now=datetime.now(timezone.utc)
-            i=competition_day(now)
-            if i is not None:
-                # Keep the active day's 1D value fresh.
-                save_live_day(i,fetch_users("24h"))
-            # Lock every completed day. This also handles a restart just after midnight
-            # without replacing a snapshot that was captured before midnight.
-            lock_finished_days()
+            now = datetime.now(timezone.utc)
+
+            for i in range(7):
+                day_start = START + timedelta(days=i)
+                day_end = day_start + timedelta(days=1)
+
+                # Only snapshot shortly after the cutoff.
+                if day_end <= now < day_end + timedelta(minutes=5):
+                    day = day_start.strftime("%Y-%m-%d")
+
+                    if len(read_day(day)) < len(WALLETS):
+                        data = fetch()
+                        rows = extract(data, "24h")
+                        save_day(day, rows)
+                        print("Saved daily snapshot:", day, flush=True)
+
         except Exception as e:
-            print("snapshot error:",e,flush=True)
-        time.sleep(30)
+            print("Snapshot error:", repr(e), flush=True)
 
-threading.Thread(target=snapshot_loop,daemon=True).start()
+        time.sleep(15)
 
-# ============================================================
-# SCORING DATA
-# ============================================================
 
-def daily_rows():
-    rows={}
+def display_daily(i, data):
+    now = datetime.now(timezone.utc)
+    day = START + timedelta(days=i)
+    day_end = day + timedelta(days=1)
+
+    saved = read_day(day.strftime("%Y-%m-%d"))
+
+    # Current competition day:
+    # show LIVE CMM 24h data.
+    if day <= now < day_end:
+        live = extract(data, "24h")
+        return [{
+            "wallet": w,
+            "name": USERNAMES.get(w) or w[:6] + "..." + w[-4:],
+            "volume": live[w]["volume"],
+            "pnl": live[w]["pnl"],
+            "status": "live 1d",
+        } for w in WALLETS]
+
+    # Completed day:
+    # use the saved 24h snapshot.
+    return [{
+        "wallet": w,
+        "name": USERNAMES.get(w) or w[:6] + "..." + w[-4:],
+        "volume": saved[w]["volume"] if w in saved else None,
+        "pnl": saved[w]["pnl"] if w in saved else None,
+        "status": "captured" if w in saved else "waiting for cutoff",
+    } for w in WALLETS]
+
+
+def points(rows, field, positive=False):
+    eligible = [
+        r for r in rows
+        if r[field] is not None and (not positive or r[field] > 0)
+    ]
+
+    eligible.sort(key=lambda r: r[field], reverse=True)
+
+    result = {r["wallet"]: 0 for r in rows}
+
+    for i, r in enumerate(eligible[:5]):
+        result[r["wallet"]] = [10, 8, 6, 4, 2][i]
+
+    return result
+
+
+def build():
+    now = datetime.now(timezone.utc)
+    data = fetch()
+
+    days = []
     for i in range(7):
-        day=(START.date()+timedelta(days=i)).isoformat()
-        data=DB.execute("SELECT wallet,volume,pnl,captured_at,locked FROM daily_snapshots WHERE day=?",(day,)).fetchall()
-        rows[day]={w:{"volume":None,"pnl":None,"captured_at":None,"locked":False} for w in WALLETS}
-        for w,v,p,c,l in data:
-            rows[day][w]={"volume":float(v),"pnl":float(p),"captured_at":c,"locked":bool(l)}
-    return rows
+        rows = display_daily(i, data)
 
-# ============================================================
-# SCORING
-# ============================================================
+        vp = points(rows, "volume")
+        pp = points(rows, "pnl", True)
 
-def daily_rows():
-    rows = {}
-    for i in range(7):
-        day = (START.date() + timedelta(days=i)).isoformat()
-        data = DB.execute(
-            "SELECT wallet, volume, pnl, captured_at FROM daily_snapshots WHERE day=?",
-            (day,)
-        ).fetchall()
-        rows[day] = {
-            w: {"volume": 0.0, "pnl": 0.0, "captured_at": None}
-            for w in WALLETS
-        }
-        for w, volume, pnl, captured in data:
-            rows[day][w] = {
-                "volume": float(volume),
-                "pnl": float(pnl),
-                "captured_at": captured
-            }
-    return rows
+        for r in rows:
+            r["volume_points"] = vp[r["wallet"]]
+            r["pnl_points"] = pp[r["wallet"]]
 
-def rank_points(values, positive_only=False):
-    eligible = []
-    for wallet, value in values.items():
-        if positive_only and value <= 0:
-            continue
-        eligible.append((wallet, value))
-    eligible.sort(key=lambda x: x[1], reverse=True)
-    pts = {w: 0 for w in values}
-    rank = 1
-    for wallet, value in eligible[:5]:
-        pts[wallet] = POINTS[rank-1]
-        rank += 1
-    return pts
+        days.append(rows)
 
-def build_standings():
-    days=daily_rows()
-    result={w:{"wallet":w,"username":USERNAMES.get(w,""),"daily_volume_points":[],"daily_pnl_points":[],
-               "volume":0.0,"pnl":0.0} for w in WALLETS}
+    # Weekly = CMM 7d directly.
+    weekly_raw = extract(data, "7d")
 
-    # Daily points come only from the locked/live 1D snapshots.
-    for i in range(7):
-        day=(START.date()+timedelta(days=i)).isoformat()
-        vals_v={w:days[day][w]["volume"] for w in WALLETS}
-        vals_p={w:days[day][w]["pnl"] for w in WALLETS}
-        # Missing historical data is not treated as real zero activity.
-        clean_v={w:(vals_v[w] if vals_v[w] is not None else 0.0) for w in WALLETS}
-        clean_p={w:(vals_p[w] if vals_p[w] is not None else 0.0) for w in WALLETS}
-        vp=rank_points(clean_v);pp=rank_points(clean_p,positive_only=True)
-        for w in WALLETS:
-            result[w]["daily_volume_points"].append(vp[w])
-            result[w]["daily_pnl_points"].append(pp[w])
-
-    # Weekly metrics come DIRECTLY from CMM 7D, as requested.
-    weekly_users=fetch_users("7d")
+    weekly = []
     for w in WALLETS:
-        u=weekly_users.get(w.lower(),{})
-        result[w]["volume"]=num(u,["volume"])
-        result[w]["pnl"]=num(u,["pnl"])
+        weekly.append({
+            "wallet": w,
+            "name": USERNAMES.get(w) or w[:6] + "..." + w[-4:],
+            "volume": weekly_raw[w]["volume"],
+            "pnl": weekly_raw[w]["pnl"],
+            "status": "live 7d",
+        })
 
-    weekly_volume_points=rank_points({w:result[w]["volume"] for w in WALLETS})
-    weekly_pnl_points=rank_points({w:result[w]["pnl"] for w in WALLETS},positive_only=True)
+    wvp = points(weekly, "volume")
+    wpp = points(weekly, "pnl", True)
 
+    final = []
     for w in WALLETS:
-        dv=result[w]["daily_volume_points"];dp=result[w]["daily_pnl_points"]
-        result[w]["volume_avg_daily"]=sum(dv)/7
-        result[w]["pnl_avg_daily"]=sum(dp)/7
-        result[w]["volume_weekly_points"]=weekly_volume_points[w]
-        result[w]["pnl_weekly_points"]=weekly_pnl_points[w]
-        result[w]["volume_final_score"]=.8*result[w]["volume_avg_daily"]+.2*weekly_volume_points[w]
-        result[w]["pnl_final_score"]=.8*result[w]["pnl_avg_daily"]+.2*weekly_pnl_points[w]
-        result[w]["pnl_qualified"]=result[w]["volume"]>=20000 and result[w]["pnl"]>0
+        dv = [days[i][WALLETS.index(w)]["volume_points"] for i in range(7)]
+        dp = [days[i][WALLETS.index(w)]["pnl_points"] for i in range(7)]
 
-    volume_rank=sorted(result.values(),key=lambda x:(-x["volume_final_score"],-x["volume"]))
-    pnl_rank=sorted(result.values(),key=lambda x:(-(x["pnl_final_score"] if x["pnl_qualified"] else -1),-x["pnl"]))
-    return days,volume_rank,pnl_rank
+        weekly_row = next(x for x in weekly if x["wallet"] == w)
 
-# ============================================================
-# WEBSITE
-# ============================================================
+        final.append({
+            "wallet": w,
+            "name": weekly_row["name"],
+            "volume": weekly_row["volume"],
+            "pnl": weekly_row["pnl"],
+            "volume_week_points": wvp[w],
+            "pnl_week_points": wpp[w],
+            "volume_avg_daily": sum(dv) / 7,
+            "pnl_avg_daily": sum(dp) / 7,
+            "volume_final_score": 0.8 * (sum(dv) / 7) + 0.2 * wvp[w],
+            "pnl_final_score": 0.8 * (sum(dp) / 7) + 0.2 * wpp[w],
+            "pnl_qualified": (
+                weekly_row["volume"] >= 20000
+                and weekly_row["pnl"] > 0
+            ),
+        })
+
+    return {
+        "competition": {
+            "start": START.isoformat(),
+            "end": END.isoformat(),
+            "now": now.isoformat(),
+            "builder": "0x9b451f8941240db8bedc99bff8917a2ed9550074",
+        },
+        "days": days,
+        "weekly": weekly,
+        "final": final,
+    }
 
 
-HTML = r'''<!doctype html>
+HTML = r"""
+<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Origami × Hyperliquid Community Competition</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Origami Community Trading Competition</title>
 <style>
-:root{--bg:#07090d;--panel:#0d1118;--panel2:#111722;--line:#202734;--text:#f4f7fb;--muted:#8993a5;--green:#36e29a;--red:#ff647c;--gold:#f5c76a;--blue:#70a7ff}
-*{box-sizing:border-box}
-body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);background:radial-gradient(circle at 50% -10%,rgba(54,226,154,.12),transparent 35%),radial-gradient(circle at 90% 20%,rgba(91,116,255,.08),transparent 28%),var(--bg)}
-.wrap{max-width:1320px;margin:auto;padding:26px 18px 55px}
-.topbar{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:22px}
-.brand{display:flex;align-items:center;gap:12px}.logo{width:42px;height:42px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(135deg,#1be395,#0f8d62);color:#06100c;font-weight:900;font-size:21px}.brand h1{font-size:19px;margin:0}.brand p{margin:3px 0 0;color:var(--muted);font-size:11px}
-.live{display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--line);border-radius:999px;background:rgba(13,17,24,.8);font-size:11px;color:#b8c1d0}.dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green)}
-.hero{border:1px solid var(--line);border-radius:22px;padding:25px;background:linear-gradient(145deg,rgba(18,24,34,.95),rgba(9,12,17,.96));box-shadow:0 18px 60px rgba(0,0,0,.28);margin-bottom:16px}
-.kicker{font-size:11px;color:var(--green);font-weight:800;letter-spacing:1.5px;text-transform:uppercase}.hero h2{font-size:29px;margin:8px 0 5px;letter-spacing:-1px}.hero p{margin:0;color:var(--muted);font-size:13px}.dates{margin-top:17px;display:flex;gap:9px;flex-wrap:wrap}.date{border:1px solid var(--line);background:rgba(255,255,255,.025);border-radius:12px;padding:10px 12px;font-size:11px}.date b{display:block;font-size:13px}.date span{color:var(--muted)}
-.stats{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}.stat{min-width:125px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.02)}.stat b{display:block;font-size:17px}.stat span{display:block;color:var(--muted);font-size:10px;margin-top:3px;text-transform:uppercase;letter-spacing:.7px}
-.streams{display:flex;gap:8px;margin:17px 0 12px}.stream{border:1px solid var(--line);background:var(--panel);color:var(--muted);padding:10px 18px;border-radius:11px;cursor:pointer;font-weight:850;font-size:12px}.stream.active{background:#eafcf5;color:#07110d}
-.daytabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:15px}.day{border:1px solid var(--line);background:transparent;color:var(--muted);padding:8px 11px;border-radius:9px;cursor:pointer;font-weight:800;font-size:10px}.day.active{border-color:#354052;color:var(--text);background:#151b25}
-.panel{border:1px solid var(--line);border-radius:18px;overflow:hidden;background:rgba(13,17,24,.92)}.panelHead{padding:17px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:12px;align-items:center}.panelHead h3{margin:0;font-size:14px}.panelHead span{color:var(--muted);font-size:10px}
-table{width:100%;border-collapse:collapse}th{background:#0a0e14;color:#687385;font-size:9px;letter-spacing:1px;text-transform:uppercase;font-weight:800}th,td{padding:13px 11px;border-bottom:1px solid #191f29;text-align:right}tr:last-child td{border-bottom:0}tbody tr:hover{background:rgba(255,255,255,.025)}th:first-child,td:first-child{text-align:center;width:55px}th:nth-child(2),td:nth-child(2){text-align:left}.rank{font-weight:900;color:#9da8b8}.rank.top{color:var(--gold)}.trader{display:flex;align-items:center;gap:9px}.avatar{width:31px;height:31px;border-radius:9px;display:grid;place-items:center;background:#161d28;border:1px solid #27303e;font-size:10px;font-weight:900}.name{font-weight:750;font-size:12px}.wallet{font:9px ui-monospace,SFMono-Regular,Menlo,monospace;color:#697487;margin-top:3px}.num{font-variant-numeric:tabular-nums;font-weight:700;font-size:11px}.score{font-size:13px;font-weight:900;color:var(--green)}.pnl{font-size:12px;font-weight:900}.pos{color:var(--green)}.neg{color:var(--red)}.qual{font-size:9px;font-weight:900;padding:4px 7px;border-radius:7px}.yes{background:rgba(54,226,154,.1);color:var(--green)}.no{background:rgba(255,100,124,.1);color:var(--red)}
-.note{margin-top:12px;color:#697487;font-size:10px;line-height:1.6}.err{padding:16px;border:1px solid rgba(255,100,124,.25);background:rgba(255,100,124,.07);color:#ff9aaa;border-radius:13px}
-.footer{display:flex;justify-content:space-between;color:#566172;font-size:10px;margin-top:14px;padding:0 3px}
-@media(max-width:850px){.topbar{align-items:flex-start}.hero h2{font-size:24px}.panel{overflow-x:auto}table{min-width:980px}}
+body{margin:0;background:#07090d;color:#f4f6f8;font-family:Arial,sans-serif}
+.wrap{max-width:1500px;margin:auto;padding:28px 20px 60px}
+h1{margin:0 0 8px;font-size:30px}
+.sub{color:#9ba5b4;margin-bottom:20px}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
+button{background:#111722;color:#e3e8ef;border:1px solid #293345;border-radius:9px;padding:10px 14px;cursor:pointer}
+button.active{background:#fff;color:#080a0d}
+.card{background:#0d1118;border:1px solid #202938;border-radius:16px;padding:18px;margin-bottom:18px;overflow:auto}
+table{width:100%;border-collapse:collapse;min-width:850px}
+th,td{padding:12px 10px;border-bottom:1px solid #1d2531;text-align:right}
+th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+th{font-size:12px;color:#8e9aaa;text-transform:uppercase}
+.green{color:#62e39a}.red{color:#ff7788}.muted{color:#758092}
+.badge{font-size:11px;background:#18202c;padding:5px 8px;border-radius:7px}
+.note{font-size:13px;color:#909aaa;line-height:1.6}
 </style>
 </head>
 <body>
 <div class="wrap">
-<div class="topbar">
-  <div class="brand"><div class="logo">O</div><div><h1>Origami × Hyperliquid</h1><p>Community Trading Competition</p></div></div>
-  <div class="live"><span class="dot"></span> LIVE DATA</div>
+<h1>🏆 Origami Community Trading Competition</h1>
+<div class="sub">2 Oct 2026 00:00 UTC → 9 Oct 2026 00:00 UTC · Origami builder-attributed data</div>
+<div class="tabs" id="tabs"></div>
+<div id="app"></div>
+<div class="card note">
+<b>Data source:</b> CoinMarketMan HyperTracker Origami builder.
+Only wallets routed through the Origami builder are included.
+<br>
+<b>Daily:</b> CMM 1D / 24h data. The current day is live; completed days are saved at the UTC cutoff.
+<br>
+<b>Weekly:</b> CMM 7D data.
+<br>
+<b>Scoring:</b> Daily top 5 = 10 / 8 / 6 / 4 / 2. Final = 80% average daily points + 20% weekly points.
 </div>
-
-<section class="hero">
-  <div class="kicker">Competition</div>
-  <h2>7-Day Community Trading Competition</h2>
-  <p>Two independent streams · Volume & PnL · Final score based on daily + weekly points</p>
-  <div class="dates">
-    <div class="date"><b>02 Oct 2026 · 00:00 UTC</b><span>Start</span></div>
-    <div class="date"><b>09 Oct 2026 · 00:00 UTC</b><span>Finish</span></div>
-    <div class="date"><b>$1,500 USDC</b><span>Total prizes</span></div>
-  </div>
-  <div class="stats">
-    <div class="stat"><b>22</b><span>Traders</span></div>
-    <div class="stat"><b id="clock">—</b><span>UTC time</span></div>
-    <div class="stat"><b id="daysDone">0 / 7</b><span>Days recorded</span></div>
-  </div>
-</section>
-
-<div class="streams">
-  <button class="stream active" id="volBtn" onclick="setStream('volume')">📊 VOLUME · 1,000 USDC</button>
-  <button class="stream" id="pnlBtn" onclick="setStream('pnl')">💰 PnL · 500 USDC</button>
-</div>
-
-<div class="daytabs" id="days"></div>
-<div id="out"></div>
-
-<div class="footer"><span>Origami builder · 22 selected wallets</span><span>Auto-refresh: 30 seconds</span></div>
 </div>
 
 <script>
-const START=new Date("2026-10-02T00:00:00Z"), END=new Date("2026-10-09T00:00:00Z");
-let STREAM="volume", DAY="overall", STATE=null;
+let DATA=null;
+let tab="volume-week";
 
-const money=x=>Number(x||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
-const safe=s=>String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]));
-const short=a=>a.slice(0,6)+"..."+a.slice(-4);
-const avatar=(n,a)=>safe((n&&n!=="—"?n:a.slice(2,4)).slice(0,2).toUpperCase());
+const tabs=[
+["volume-week","📊 Volume — Weekly"],
+["pnl-week","💰 PnL — Weekly"],
+["volume-day-0","Volume — Oct 2"],
+["volume-day-1","Volume — Oct 3"],
+["volume-day-2","Volume — Oct 4"],
+["volume-day-3","Volume — Oct 5"],
+["volume-day-4","Volume — Oct 6"],
+["volume-day-5","Volume — Oct 7"],
+["volume-day-6","Volume — Oct 8"],
+["pnl-day-0","PnL — Oct 2"],
+["pnl-day-1","PnL — Oct 3"],
+["pnl-day-2","PnL — Oct 4"],
+["pnl-day-3","PnL — Oct 5"],
+["pnl-day-4","PnL — Oct 6"],
+["pnl-day-5","PnL — Oct 7"],
+["pnl-day-6","PnL — Oct 8"]
+];
 
-function setStream(s){STREAM=s;document.getElementById("volBtn").classList.toggle("active",s==="volume");document.getElementById("pnlBtn").classList.toggle("active",s==="pnl");render();}
-function setDay(d){DAY=d;document.querySelectorAll(".day").forEach(x=>x.classList.toggle("active",x.dataset.day===d));render();}
-
-function renderDays(){
-  const el=document.getElementById("days");
-  let h='<button class="day active" data-day="overall" onclick="setDay(\'overall\')">OVERALL</button>';
-  for(let i=0;i<7;i++){
-    const d=new Date(START.getTime()+i*86400000);
-    const key=d.toISOString().slice(0,10);
-    h+=`<button class="day" data-day="${key}" onclick="setDay('${key}')">DAY ${i+1}<br>${d.toLocaleDateString(undefined,{month:"short",day:"numeric",timeZone:"UTC"})}</button>`;
-  }
-  el.innerHTML=h;
+function esc(x){
+ return String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
 }
-
+function money(x){
+ if(x===null||x===undefined)return '<span class="muted">—</span>';
+ return '$'+Number(x).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function pnl(x){
+ if(x===null||x===undefined)return '<span class="muted">—</span>';
+ let n=Number(x);
+ return '<span class="'+(n>=0?'green':'red')+'">'+(n>=0?'+':'')+money(n)+'</span>';
+}
+function renderTabs(){
+ document.getElementById("tabs").innerHTML=tabs.map(t=>
+ '<button class="'+(t[0]===tab?'active':'')+
+ '" onclick="tab=\''+t[0]+'\';renderTabs();render()">'+t[1]+'</button>'
+ ).join("");
+}
 function render(){
-  if(!STATE)return;
-  document.getElementById("clock").textContent=new Date().toISOString().slice(11,19);
-  document.getElementById("daysDone").textContent=STATE.days_done+" / 7";
+ let p=tab.split("-");
+ let metric=p[0];
+ let scope=p[1];
+ let idx=p[2];
 
-  const arr=STREAM==="volume"?STATE.volume:STATE.pnl;
-  let rows=arr;
+ let rows;
 
-  if(DAY!=="overall"){
-    const d=STATE.days[DAY];
-    rows=arr.map(x=>{
-      const q=d?.[x.wallet]||{volume:0,pnl:0,points:0};
-      return {...x,metric:STREAM==="volume"?q.volume:q.pnl,dayPoints:STREAM==="volume"?q.volume_points:q.pnl_points};
-    }).sort((a,b)=>b.metric-a.metric);
-  }
+ if(scope==="week"){
+   rows=DATA.final.map(r=>({
+     ...r,
+     value:r[metric],
+     points:r[metric+"_week_points"],
+     score:metric==="volume"?r.volume_final_score:r.pnl_final_score
+   }));
+   rows.sort((a,b)=>b.score-a.score);
+ }else{
+   rows=DATA.days[Number(idx)].map(r=>({
+     ...r,
+     value:r[metric],
+     points:r[metric+"_points"]
+   }));
+   rows.sort((a,b)=>(b.value??-Infinity)-(a.value??-Infinity));
+ }
 
-  const title=STREAM==="volume"?"Volume Leaderboard":"PnL Leaderboard";
-  const metric=STREAM==="volume"?"Executed Volume":"Net PnL";
-  let head=DAY==="overall"?
-    `<th>Daily Avg</th><th>Weekly Pts</th><th>Final Score</th><th>${metric}</th>`:
-    `<th>Points</th><th>${metric}</th><th>Daily Rank</th>`;
+ let title=metric==="volume"?"📊 Volume":"💰 PnL";
 
-  let body=rows.map((x,i)=>{
-    const value=DAY==="overall"?(STREAM==="volume"?x.volume:x.pnl):x.metric;
-    const score=DAY==="overall"?(STREAM==="volume"?x.final_score:x.final_score):x.dayPoints;
-    const positive=value>=0;
-    return `<tr>
-      <td><span class="rank ${i<3?"top":""}">${i<3?["🥇","🥈","🥉"][i]:i+1}</span></td>
-      <td><div class="trader"><div class="avatar">${avatar(x.username,x.wallet)}</div><div><div class="name">${safe(x.username||"Anonymous Trader")}</div><div class="wallet">${short(x.wallet)}</div></div></div></td>
-      ${DAY==="overall"
-        ? `<td class="num">${money(STREAM==="volume"?x.avg_daily:x.avg_daily)}</td><td class="num">${x.weekly_points}</td><td class="score">${score.toFixed(2)}</td><td class="${STREAM==="pnl"?(positive?"pos":"neg"):"num"}">${STREAM==="pnl"?(positive?"+":"-")+"$"+money(Math.abs(value)):"$"+money(value)}</td>`
-        : `<td class="score">${score}</td><td class="${STREAM==="pnl"?(positive?"pos":"neg"):"num"}">${STREAM==="pnl"?(positive?"+":"-")+"$"+money(Math.abs(value)):"$"+money(value)}</td><td class="num">#${i+1}</td>`}
-    </tr>`;
-  }).join("");
+ let html='<div class="card"><h2>'+title+' · '+(scope==="week"?"Weekly":"Daily")+
+ '</h2><table><thead><tr><th>#</th><th>Trader</th><th>'+title+
+ '</th><th>Points</th>';
 
-  document.getElementById("out").innerHTML=`
-  <section class="panel">
-    <div class="panelHead"><h3>${title} · ${DAY==="overall"?"FINAL SCORING":"DAY "+(Object.keys(STATE.days).indexOf(DAY)+1)}</h3><span>${DAY==="overall"?"80% daily average + 20% weekly points":"10 / 8 / 6 / 4 / 2 points"}</span></div>
-    <table><thead><tr><th>Rank</th><th>Trader</th>${head}</tr></thead><tbody>${body}</tbody></table>
-  </section>
-  <div class="note">
-    ${STREAM==="volume"
-      ?"Volume stream: both opening and closing trades count. Profitability does not affect eligibility."
-      :"PnL stream: only positive daily PnL earns daily points. Final PnL qualification requires at least $20,000 weekly volume and positive weekly net PnL."}
-  </div>`;
+ if(scope==="week"){
+   html+='<th>Avg Daily Points</th><th>Final Score</th><th>Status</th>';
+ }else{
+   html+='<th>Status</th>';
+ }
+
+ html+='</tr></thead><tbody>';
+
+ rows.forEach((r,i)=>{
+   html+='<tr>'+
+   '<td><b>'+(i+1)+'</b></td>'+
+   '<td><b>'+esc(r.name)+'</b><br><span class="muted">'+
+   esc(r.wallet.slice(0,8)+'...'+r.wallet.slice(-6))+'</span></td>'+
+   '<td>'+(metric==="volume"?money(r.value):pnl(r.value))+'</td>'+
+   '<td><b>'+r.points+'</b></td>';
+
+   if(scope==="week"){
+     let avg=metric==="volume"?r.volume_avg_daily:r.pnl_avg_daily;
+     html+='<td>'+Number(avg).toFixed(2)+'</td>'+
+     '<td><b>'+Number(r.score).toFixed(2)+'</b></td>'+
+     '<td><span class="badge">'+esc(r.status||"live 7d")+'</span></td>';
+   }else{
+     html+='<td><span class="badge">'+esc(r.status||"")+'</span></td>';
+   }
+
+   html+='</tr>';
+ });
+
+ html+='</tbody></table></div>';
+ document.getElementById("app").innerHTML=html;
 }
 
 async function load(){
-  try{
-    const r=await fetch("/state?x="+Date.now());
-    if(!r.ok)throw new Error("Leaderboard data request failed.");
-    STATE=await r.json();render();
-  }catch(e){document.getElementById("out").innerHTML=`<div class="err">${safe(e.message)}</div>`}
+ try{
+   const r=await fetch("/data?t="+Date.now(),{cache:"no-store"});
+   DATA=await r.json();
+
+   if(DATA.error){
+     document.getElementById("app").innerHTML=
+     '<div class="card">Data temporarily unavailable. Retrying…</div>';
+     return;
+   }
+
+   renderTabs();
+   render();
+ }catch(e){
+   document.getElementById("app").innerHTML=
+   '<div class="card">Data temporarily unavailable. Retrying…</div>';
+ }
 }
-renderDays();load();setInterval(load,30000);
+
+load();
+setInterval(load,30000);
 </script>
 </body>
-</html>"""
+</html>
+"""
 
-
-# ============================================================
-# HTTP SERVER
-# ============================================================
 
 class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.startswith("/state"):
-            try:
-                days, volume_rank, pnl_rank = build_standings()
-                now=datetime.now(timezone.utc)
-                out_days={}
-                done=0
-                for i in range(7):
-                    day=(START.date()+timedelta(days=i)).isoformat()
-                    if any(v["captured_at"] for v in days[day].values()):
-                        done+=1
-                    vals_v={w:days[day][w]["volume"] for w in WALLETS}
-                    vals_p={w:days[day][w]["pnl"] for w in WALLETS}
-                    vp=rank_points(vals_v)
-                    pp=rank_points(vals_p,positive_only=True)
-                    out_days[day]={}
-                    for w in WALLETS:
-                        out_days[day][w]={
-                            "volume":vals_v[w],
-                            "pnl":vals_p[w],
-                            "volume_points":vp[w],
-                            "pnl_points":pp[w]
-                        }
-                def pack(rows, stream):
-                    result=[]
-                    for x in rows:
-                        result.append({
-                            "wallet":x["wallet"],"username":x["username"],
-                            "volume":x["volume"],"pnl":x["pnl"],
-                            "avg_daily":x["volume_avg_daily"] if stream=="volume" else x["pnl_avg_daily"],
-                            "weekly_points":x["volume_weekly_points"] if stream=="volume" else x["pnl_weekly_points"],
-                            "final_score":x["volume_final_score"] if stream=="volume" else x["pnl_final_score"],
-                            "qualified":True if stream=="volume" else x["pnl_qualified"]
-                        })
-                    return result
-                payload={
-                    "now":now.isoformat(),
-                    "days_done":done,
-                    "volume":pack(volume_rank,"volume"),
-                    "pnl":pack(pnl_rank,"pnl"),
-                    "days":out_days
-                }
-                raw=json.dumps(payload).encode()
-                self.send_response(200);self.send_header("Content-Type","application/json");self.send_header("Cache-Control","no-store");self.end_headers();self.wfile.write(raw)
-            except Exception as e:
-                self.send_response(500);self.send_header("Content-Type","text/plain");self.end_headers();self.wfile.write(str(e).encode())
-        else:
-            self.send_response(200);self.send_header("Content-Type","text/html; charset=utf-8");self.end_headers();self.wfile.write(HTML.encode())
+    def send_text(self, status, text, content_type):
+        raw=text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type",content_type)
+        self.send_header("Content-Length",str(len(raw)))
+        self.send_header("Cache-Control","no-store")
+        self.end_headers()
+        self.wfile.write(raw)
 
-    def log_message(self, format, *args):
+    def do_GET(self):
+        if self.path.startswith("/data"):
+            try:
+                self.send_text(
+                    200,
+                    json.dumps(build(),separators=(",",":")),
+                    "application/json; charset=utf-8"
+                )
+            except Exception as e:
+                print("DATA ERROR:",repr(e),flush=True)
+                self.send_text(
+                    200,
+                    json.dumps({"error":str(e)}),
+                    "application/json; charset=utf-8"
+                )
+        else:
+            self.send_text(200,HTML,"text/html; charset=utf-8")
+
+    def log_message(self,fmt,*args):
         return
 
-HOST="0.0.0.0"
-PORT=int(os.environ.get("PORT","8765"))
-server=HTTPServer((HOST,PORT),Handler)
 
-if "PORT" not in os.environ:
-    import webbrowser
-    threading.Timer(1,lambda:webbrowser.open(f"http://127.0.0.1:{PORT}")).start()
+def main():
+    init_db()
 
-print(f"Starting Origami competition leaderboard on {HOST}:{PORT}")
-print("Competition: 2 Oct 2026 00:00 UTC -> 9 Oct 2026 00:00 UTC")
-print("Refresh: 30 seconds")
+    threading.Thread(
+        target=snapshot_worker,
+        daemon=True
+    ).start()
 
-try:
+    port=int(os.environ.get("PORT","8765"))
+    server=ThreadingHTTPServer(("0.0.0.0",port),Handler)
+
+    print("Origami competition leaderboard running on",port,flush=True)
     server.serve_forever()
-except KeyboardInterrupt:
-    server.server_close()
+
+
+if __name__=="__main__":
+    main()
