@@ -1,5 +1,6 @@
 import os
 import requests
+import json
 
 API_KEY = os.getenv("CMM_API_KEY")
 
@@ -9,11 +10,9 @@ if not API_KEY:
 
 BASE_URL = "https://ht-api.coinmarketman.com/api/external"
 
-BUILDER = "0x9b451f8941240db8bedc99bff8917a2ed9550074"
-
 WALLET = "0x28d6dda751db999b991ed169bb773e8e855c36c2"
 
-url = f"{BASE_URL}/builders/{BUILDER}/fills"
+url = f"{BASE_URL}/closed-trades"
 
 headers = {
     "Authorization": f"Bearer {API_KEY}",
@@ -21,20 +20,17 @@ headers = {
 }
 
 params = {
-    "start": "2026-10-02T00:00:00.000Z",
-    "end": "2026-10-03T00:00:00.000Z",
-    "address[]": WALLET,
-    "fillType": "perp",
-    "limit": 500,
+    "address": WALLET,
+    "startTime": "2026-10-02T00:00:00.000Z",
+    "endTime": "2026-10-03T00:00:00.000Z",
+    "limit": 200,
 }
 
 print("======================================")
-print("Testing HyperTracker Builder Fills API")
+print("Testing HyperTracker Closed Trades API")
 print("======================================")
-print("Builder:", BUILDER)
 print("Wallet:", WALLET)
-print("Competition day:")
-print("2026-10-02 00:00 UTC -> 2026-10-03 00:00 UTC")
+print("Time: 2026-10-02 00:00 UTC -> 2026-10-03 00:00 UTC")
 print()
 
 try:
