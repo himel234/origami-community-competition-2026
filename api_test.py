@@ -22,10 +22,10 @@ headers = {
 
 params = {
     "start": "2026-10-02T00:00:00.000Z",
-    "end": "2026-10-02T01:00:00.000Z",
+    "end": "2026-10-03T00:00:00.000Z",
     "address[]": WALLET,
     "fillType": "perp",
-    "limit": 10,
+    "limit": 500,
 }
 
 print("======================================")
@@ -33,7 +33,8 @@ print("Testing HyperTracker Builder Fills API")
 print("======================================")
 print("Builder:", BUILDER)
 print("Wallet:", WALLET)
-print("Time:", params["start"], "->", params["end"])
+print("Competition day:")
+print("2026-10-02 00:00 UTC -> 2026-10-03 00:00 UTC")
 print()
 
 try:
@@ -41,18 +42,18 @@ try:
         url,
         headers=headers,
         params=params,
-        timeout=30,
+        timeout=60,
     )
+
+    print("HTTP STATUS:", response.status_code)
+    print()
 
     print("REQUEST URL:")
     print(response.url)
     print()
 
-    print("HTTP STATUS:", response.status_code)
-    print()
-
     print("RESPONSE:")
-    print(response.text[:10000])
+    print(response.text[:30000])
 
 except Exception as e:
     print("REQUEST ERROR:", repr(e))
