@@ -363,7 +363,7 @@ def build_weekly():
 
     result = []
     for wallet in WALLETS:
-        days = max(1, metrics[wallet]["days"])
+        days = 7
         avg_vol = metrics[wallet]["daily_volume_points"] / days
         avg_pnl = metrics[wallet]["daily_pnl_points"] / days
 
@@ -464,16 +464,18 @@ body{margin:0;background:#07090d;color:#f5f7fb;font-family:Inter,system-ui,sans-
 .wrap{max-width:1250px;margin:auto;padding:28px 18px 60px}
 .hero{display:flex;justify-content:space-between;gap:20px;align-items:end}
 h1{margin:0 0 8px;font-size:30px}.muted{color:#8993a5}
-.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:24px 0}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:24px 0 10px}
+.daytabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}
+.streamtabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 18px}
 button{border:1px solid #222a36;background:#111720;color:#dce2eb;border-radius:10px;padding:10px 14px;cursor:pointer}
 button.active{background:#f0f3f7;color:#080b10}
 .card{background:#0e131b;border:1px solid #222a36;border-radius:16px;overflow:hidden}
-.notice{margin:18px 0;padding:12px 14px;border:1px solid #222a36;border-radius:12px;color:#aab3c1;font-size:13px}
-.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:1050px}
+.notice{margin:18px 0;padding:14px;border:1px solid #222a36;border-radius:12px;color:#aab3c1;font-size:13px;line-height:1.6}
+.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:850px}
 th,td{padding:13px 12px;border-bottom:1px solid #222a36;text-align:left}
 th{font-size:12px;color:#8993a5;text-transform:uppercase}.right{text-align:right}
 .pos{color:#39e29a}.neg{color:#ff657d}.wallet{font-size:11px;color:#697487;margin-top:3px}
-.stream{font-weight:700;color:#f5f7fb;margin-bottom:6px}
+.titlebar{margin:8px 0 14px;font-size:18px;font-weight:700}
 </style>
 </head>
 <body>
@@ -487,103 +489,117 @@ th{font-size:12px;color:#8993a5;text-transform:uppercase}.right{text-align:right
 </div>
 
 <div class="notice">
-<b>Volume:</b> every Origami-builder perp fill counts by executed notional
-(price × size), including both opening and closing trades.
-&nbsp;&nbsp;|&nbsp;&nbsp;
-<b>PnL:</b> Origami-builder fills, fees, matched funding and historical
-unrealized-PnL proxy are used.
-<br><br>
-Final score for each stream = 80% × average daily points + 20% × weekly points.
-PnL qualification requires at least $20,000 weekly volume and positive weekly net PnL.
+<b>Two independent streams:</b> Volume and PnL.<br>
+<b>Volume:</b> all Origami-builder perp fills count by executed notional (price × size), including opening and closing trades.<br>
+<b>PnL:</b> net profit includes trading fees, matched funding and the historical unrealized-PnL proxy.<br>
+<b>Scoring:</b> each day top 5 earn 10 / 8 / 6 / 4 / 2 points. Weekly totals are ranked separately. Final score = 80% × average daily points + 20% × weekly points. All seven days count, including zero-point days.<br>
+<b>PnL qualification:</b> at least $20,000 weekly volume and positive weekly net PnL are required for the PnL prize.
 </div>
 
-<div class="tabs" id="tabs"></div>
+<div class="tabs" id="weeklyTabs"></div>
+<div class="daytabs" id="dayTabs"></div>
+<div class="streamtabs" id="streamTabs"></div>
+<div class="titlebar" id="leaderTitle"></div>
 
 <div class="card"><div class="table-wrap"><table>
-<thead><tr>
-<th>Rank</th><th>Trader</th><th>Username</th>
-<th class="right">Volume</th><th class="right">PnL</th>
-<th class="right">Daily Pts</th><th class="right">Weekly Pts</th>
-<th class="right">Final Score</th>
-</tr></thead>
+<thead id="thead"></thead>
 <tbody id="body"></tbody>
 </table></div></div>
 </div>
 
 <script>
+let selectedDay="2026-10-02";
+let stream="volume";
 let mode="volume-weekly";
 
-const tabs=[
-["volume-weekly","🏆 Volume Weekly"],
-["pnl-weekly","💰 PnL Weekly"],
-["day-2026-10-02","Oct 2"],
-["day-2026-10-03","Oct 3"],
-["day-2026-10-04","Oct 4"],
-["day-2026-10-05","Oct 5"],
-["day-2026-10-06","Oct 6"],
-["day-2026-10-07","Oct 7"],
-["day-2026-10-08","Oct 8"]
+const days=[
+["2026-10-02","Oct 2"],["2026-10-03","Oct 3"],["2026-10-04","Oct 4"],
+["2026-10-05","Oct 5"],["2026-10-06","Oct 6"],["2026-10-07","Oct 7"],
+["2026-10-08","Oct 8"]
 ];
 
-for(const [id,label] of tabs){
+function button(label,id,active,onclick){
  const b=document.createElement("button");
  b.textContent=label;
- b.onclick=()=>{
-   mode=id;
-   document.querySelectorAll("#tabs button").forEach(x=>x.classList.remove("active"));
-   b.classList.add("active");
-   load();
- };
- if(id===mode)b.className="active";
- document.getElementById("tabs").appendChild(b);
+ if(active)b.className="active";
+ b.onclick=onclick;
+ return b;
 }
 
-function money(x){
- return Number(x||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+const wt=document.getElementById("weeklyTabs");
+wt.appendChild(button("🏆 Volume Weekly","volume-weekly",true,()=>selectWeekly("volume")));
+wt.appendChild(button("💰 PnL Weekly","pnl-weekly",false,()=>selectWeekly("pnl")));
+
+const dt=document.getElementById("dayTabs");
+for(const [d,label] of days){
+ dt.appendChild(button(label,d,d===selectedDay,()=>selectDay(d)));
 }
+
+function selectWeekly(s){
+ stream=s; mode=s+"-weekly";
+ document.querySelectorAll("#weeklyTabs button").forEach((b,i)=>b.classList.toggle("active",i===(s==="volume"?0:1)));
+ document.querySelectorAll("#dayTabs button").forEach(b=>b.classList.remove("active"));
+ document.getElementById("streamTabs").innerHTML="";
+ load();
+}
+
+function selectDay(d){
+ selectedDay=d;
+ mode="day-"+d+"-"+stream;
+ document.querySelectorAll("#dayTabs button").forEach(b=>b.classList.toggle("active",b.textContent===days.find(x=>x[0]===d)[1]));
+ document.querySelectorAll("#weeklyTabs button").forEach(b=>b.classList.remove("active"));
+ renderStreamTabs();
+ load();
+}
+
+function renderStreamTabs(){
+ const st=document.getElementById("streamTabs");
+ st.innerHTML="";
+ st.appendChild(button("📊 Volume", "volume", stream==="volume",()=>{stream="volume";mode="day-"+selectedDay+"-volume";renderStreamTabs();load();}));
+ st.appendChild(button("💰 PnL", "pnl", stream==="pnl",()=>{stream="pnl";mode="day-"+selectedDay+"-pnl";renderStreamTabs();load();}));
+}
+
+renderStreamTabs();
+
+function money(x){return Number(x||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});}
 function short(x){return x.slice(0,6)+"…"+x.slice(-4)}
-function esc(x){
- return String(x||"").replaceAll("&","&amp;").replaceAll("<","&lt;")
-   .replaceAll(">","&gt;").replaceAll('"',"&quot;");
+function esc(x){return String(x||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");}
+
+function renderTable(rows,isPnl){
+ const thead=document.getElementById("thead");
+ const title=document.getElementById("leaderTitle");
+ if(isPnl){
+   title.textContent="💰 PnL Leaderboard";
+   thead.innerHTML=`<tr><th>Rank</th><th>Trader</th><th>Username</th><th class="right">PnL</th><th class="right">Daily Pts</th><th class="right">Weekly Pts</th><th class="right">Final Score</th></tr>`;
+ }else{
+   title.textContent="📊 Volume Leaderboard";
+   thead.innerHTML=`<tr><th>Rank</th><th>Trader</th><th>Username</th><th class="right">Volume</th><th class="right">Daily Pts</th><th class="right">Weekly Pts</th><th class="right">Final Score</th></tr>`;
+ }
+ document.getElementById("body").innerHTML=rows.map((x,i)=>{
+   const score=Number(x.final_score||0), pnl=Number(x.pnl||0), volume=Number(x.volume||0);
+   const main=isPnl?pnl:volume;
+   return `<tr>
+   <td><b>${i+1}</b></td>
+   <td><b>${esc(x.username||"Anonymous Trader")}</b><div class="wallet">${short(x.wallet)}</div></td>
+   <td>${esc(x.username||"—")}</td>
+   <td class="right ${isPnl?(pnl>=0?"pos":"neg"):""}">${isPnl?(pnl>=0?"+":"-")+"$"+money(Math.abs(main)):"$"+money(main)}</td>
+   <td class="right">${x.daily_points??0}</td>
+   <td class="right">${x.weekly_points??0}</td>
+   <td class="right"><b>${money(score)}</b></td>
+   </tr>`;
+ }).join("");
 }
 
 async function load(){
  try{
   const r=await fetch("/data?mode="+encodeURIComponent(mode)+"&x="+Date.now());
   const d=await r.json();
-
-  document.getElementById("status").textContent=
-    "Updated "+new Date().toLocaleTimeString();
-
-  document.getElementById("body").innerHTML=d.rows.map((x,i)=>{
-    const score = Number(x.final_score||0);
-    const pnl = Number(x.pnl||0);
-    const volume = Number(x.volume||0);
-
-    return `
-    <tr>
-      <td><b>${i+1}</b></td>
-      <td>
-        <b>${esc(x.username||"Anonymous Trader")}</b>
-        <div class="wallet">${short(x.wallet)}</div>
-      </td>
-      <td>${esc(x.username||"—")}</td>
-      <td class="right">$${money(volume)}</td>
-      <td class="right ${pnl>=0?"pos":"neg"}">
-        ${pnl>=0?"+":"-"}$${money(Math.abs(pnl))}
-      </td>
-      <td class="right">${x.daily_points??0}</td>
-      <td class="right">${x.weekly_points??0}</td>
-      <td class="right"><b>${money(score)}</b></td>
-    </tr>`;
-  }).join("");
-
+  document.getElementById("status").textContent="Updated "+new Date().toLocaleTimeString();
+  renderTable(d.rows,stream==="pnl");
  }catch(e){
-  document.getElementById("body").innerHTML=
-    "<tr><td colspan='8'>"+esc(e.message)+"</td></tr>";
+  document.getElementById("body").innerHTML="<tr><td colspan='7'>"+esc(e.message)+"</td></tr>";
  }
 }
-
 load();
 setInterval(load,60000);
 </script>
@@ -606,45 +622,38 @@ class Handler(BaseHTTPRequestHandler):
             if mode in ("volume-weekly", "pnl-weekly"):
                 weekly = build_weekly()
                 rows = []
-
+                is_pnl = mode == "pnl-weekly"
                 for row in weekly:
-                    if mode == "volume-weekly":
-                        rows.append({
-                            "wallet": row["wallet"],
-                            "username": row["username"],
-                            "volume": row["volume"],
-                            "pnl": row["pnl"],
-                            "daily_points": 0,
-                            "weekly_points": row["weekly_volume_points"],
-                            "final_score": row["volume_final"],
-                        })
-                    else:
-                        rows.append({
-                            "wallet": row["wallet"],
-                            "username": row["username"],
-                            "volume": row["volume"],
-                            "pnl": row["pnl"],
-                            "daily_points": 0,
-                            "weekly_points": row["weekly_pnl_points"],
-                            "final_score": row["pnl_final"],
-                            "pnl_eligible": row["pnl_eligible"],
-                        })
-
-                rows.sort(key=lambda x: x["final_score"], reverse=True)
-
-            elif mode.startswith("day-"):
-                rows = []
-                for row in build_daily(mode[4:]):
                     rows.append({
                         "wallet": row["wallet"],
                         "username": row["username"],
                         "volume": row["volume"],
                         "pnl": row["pnl"],
-                        "daily_points": row["volume_points"],
-                        "weekly_points": 0,
-                        "final_score": row["volume_points"],
+                        "daily_points": 0,
+                        "weekly_points": row["weekly_pnl_points"] if is_pnl else row["weekly_volume_points"],
+                        "final_score": row["pnl_final"] if is_pnl else row["volume_final"],
+                        "pnl_eligible": row.get("pnl_eligible", False),
                     })
-                rows.sort(key=lambda x: x["volume"], reverse=True)
+                rows.sort(key=lambda x: x["final_score"], reverse=True)
+
+            elif mode.startswith("day-"):
+                parts = mode.split("-")
+                # mode is day-YYYY-MM-DD-volume or day-YYYY-MM-DD-pnl
+                day = "-".join(parts[1:4])
+                is_pnl = parts[4] == "pnl"
+                stream_rows = build_daily(day)
+                rows = []
+                for row in stream_rows:
+                    rows.append({
+                        "wallet": row["wallet"],
+                        "username": row["username"],
+                        "volume": row["volume"],
+                        "pnl": row["pnl"],
+                        "daily_points": row["pnl_points"] if is_pnl else row["volume_points"],
+                        "weekly_points": 0,
+                        "final_score": row["pnl_points"] if is_pnl else row["volume_points"],
+                    })
+                rows.sort(key=lambda x: (x["pnl"] if is_pnl else x["volume"]), reverse=True)
 
             else:
                 rows = []
