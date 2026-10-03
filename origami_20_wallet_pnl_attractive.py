@@ -1,40 +1,28 @@
 
-import json
 import os
+import json
 import sqlite3
 import threading
 import time
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
 import requests
 
-# ============================================================
-# SIMPLE ORIGAMI COMPETITION LEADERBOARD
-# ============================================================
-# Source: CoinMarketMan HyperTracker public Origami builder data
-# Builder: 0x9b451f8941240db8bedc99bff8917a2ed9550074
-#
-# Daily tabs:
-#   - use CMM 24h data for the CURRENT competition day
-#   - save that 24h data at each 00:00 UTC cutoff
-#
-# Weekly:
-#   - use CMM 7d data directly
-#
-# This is intentionally kept simple, like the previous leaderboard.
-# ============================================================
+API_KEY = os.getenv("CMM_API_KEY", "").strip()
+if not API_KEY:
+    raise RuntimeError("CMM_API_KEY is not set in Render.")
 
-DATA_URL = (
-    "https://dw3ji7n7thadj.cloudfront.net/aggregator/builders/"
-    "0x9b451f8941240db8bedc99bff8917a2ed9550074_v2.json"
-)
+API_BASE = "https://ht-api.coinmarketman.com/api/external"
+HL_INFO = "https://api.hyperliquid.xyz/info"
+BUILDER = "0x9b451f8941240db8bedc99bff8917a2ed9550074"
 
-START = datetime(2026, 10, 2, 0, 0, tzinfo=timezone.utc)
-END = datetime(2026, 10, 9, 0, 0, tzinfo=timezone.utc)
-
-REFRESH_SECONDS = 30
-DB_FILE = "origami_competition.sqlite3"
+COMPETITION_START = datetime(2026, 10, 2, tzinfo=timezone.utc)
+COMPETITION_END = datetime(2026, 10, 9, tzinfo=timezone.utc)
+PORT = int(os.getenv("PORT", "10000"))
+REFRESH_SECONDS = 300
+DB_FILE = "origami_competition.db"
 
 WALLETS = [
     "0x28d6dda751db999b991ed169bb773e8e855c36c2",
@@ -60,581 +48,561 @@ WALLETS = [
     "0x7f2663fc903d269a9670ce5ad76d92f7a0b70e66",
     "0x8a591916b925c399a4d2791d186dfae5366cc12a",
     "0xec3c5055f1d402e41c9974fb8291265e087baa9c",
-    "0xBe017F5EDc123D52572BE3743e3E136FcCd4C484",
+    "0xbe017f5edc123d52572be3743e3e136fccd4c484",
 ]
 
 USERNAMES = {
-    WALLETS[0]: "@shamim215",
-    WALLETS[1]: "@puperet",
-    WALLETS[2]: "",
-    WALLETS[3]: "@BARYSBYEK",
-    WALLETS[4]: "",
-    WALLETS[5]: "@himel234",
-    WALLETS[6]: "",
-    WALLETS[7]: "@tomtop",
-    WALLETS[8]: "",
-    WALLETS[9]: "",
-    WALLETS[10]: "@abshamweb3",
-    WALLETS[11]: "",
-    WALLETS[12]: "@madikpeju",
-    WALLETS[13]: "",
-    WALLETS[14]: "@Edward6742",
-    WALLETS[15]: "",
-    WALLETS[16]: "",
-    WALLETS[17]: "",
-    WALLETS[18]: "",
-    WALLETS[19]: "",
-    WALLETS[20]: "@Safal818",
-    WALLETS[21]: "@Eleonore3663",
-    WALLETS[22]: "",
-    WALLETS[23]: "",
+    "0x28d6dda751db999b991ed169bb773e8e855c36c2": "@shamim215",
+    "0x6188c0c04bd502541b77d8cd43667944437b3eda": "@puperet",
+    "0xfff111cdc96472c137596a91d001fd870557501c": "@BARYSBYEK",
+    "0xfcb4dbcb3dbe57f02f4a5fa603a1da948f549673": "@himel234",
+    "0xbf787b37c4db340088b154e3c343f4d94508ac8c": "@tomtop",
+    "0x097e0a249c065e279ec08ea021cff3dd11c32d41": "@abshamweb3",
+    "0xb29b8367e3a07928d5aa788bd9137d8c416e65ae": "@madikpeju",
+    "0x28a97f53f11becbb1d531ed26a953cba87d115c8": "@Edward6742",
+    "0x7f2663fc903d269a9670ce5ad76d92f7a0b70e66": "@Safal818",
+    "0x8a591916b925c399a4d2791d186dfae5366cc12a": "@Eleonore3663",
 }
 
+HEADERS = {"Authorization": f"Bearer {API_KEY}", "Accept": "application/json"}
 session = requests.Session()
-session.headers.update({
-    "User-Agent": "Origami-Community-Competition/1.0",
-    "Accept": "application/json",
-})
+session.headers.update(HEADERS)
 
-lock = threading.Lock()
-cache = {"time": 0, "data": None}
+def utc_iso(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
+def parse_iso(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
-def fetch():
-    with lock:
-        if cache["data"] is not None and time.time() - cache["time"] < 20:
-            return cache["data"]
-
-        last = None
-        for attempt in range(4):
-            try:
-                r = session.get(DATA_URL, timeout=20)
-                r.raise_for_status()
-                data = r.json()
-                cache["data"] = data
-                cache["time"] = time.time()
-                return data
-            except Exception as e:
-                last = e
-                time.sleep(1 + attempt)
-
-        raise RuntimeError(str(last))
-
-
-def find_timeframe(data, timeframe):
-    """
-    Handles the CMM JSON structures used by the previous leaderboard.
-    """
-    users = data.get("users") if isinstance(data, dict) else None
-
-    if isinstance(users, dict):
-        x = users.get(timeframe)
-        if x is not None:
-            return x
-
-    x = data.get(timeframe) if isinstance(data, dict) else None
-
-    if isinstance(x, dict) and "users" in x:
-        return x["users"]
-
-    return x if x is not None else []
-
-
-def wallet_map(data, timeframe):
-    raw = find_timeframe(data, timeframe)
-    result = {}
-
-    if isinstance(raw, dict):
-        for key, item in raw.items():
-            if not isinstance(item, dict):
-                continue
-
-            address = key
-            if not address.lower().startswith("0x"):
-                address = item.get("address") or item.get("user") or ""
-
-            if isinstance(address, str) and address.lower().startswith("0x"):
-                result[address.lower()] = item
-
-    elif isinstance(raw, list):
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-
-            address = (
-                item.get("address")
-                or item.get("user")
-                or item.get("wallet", {}).get("address", "")
-            )
-
-            if isinstance(address, str) and address.lower().startswith("0x"):
-                result[address.lower()] = item
-
-    return result
-
-
-def num(item, *keys):
-    for key in keys:
-        try:
-            if item.get(key) is not None:
-                return float(item[key])
-        except Exception:
-            pass
-    return 0.0
-
-
-def extract(data, timeframe):
-    users = wallet_map(data, timeframe)
-    result = {}
-
-    for wallet in WALLETS:
-        item = users.get(wallet.lower())
-
-        if item is None:
-            result[wallet] = {
-                "volume": 0.0,
-                "pnl": 0.0,
-                "found": False,
-            }
-        else:
-            result[wallet] = {
-                "volume": num(item, "volume"),
-                "pnl": num(item, "pnl"),
-                "found": True,
-            }
-
-    return result
-
-
-def init_db():
-    con = sqlite3.connect(DB_FILE)
-    con.execute("""
+def db_connect():
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS daily (
             day TEXT NOT NULL,
             wallet TEXT NOT NULL,
-            volume REAL NOT NULL,
-            pnl REAL NOT NULL,
-            captured_at TEXT NOT NULL,
+            volume REAL NOT NULL DEFAULT 0,
+            realized REAL NOT NULL DEFAULT 0,
+            fees REAL NOT NULL DEFAULT 0,
+            funding REAL NOT NULL DEFAULT 0,
+            unrealized REAL NOT NULL DEFAULT 0,
+            pnl REAL NOT NULL DEFAULT 0,
+            updated TEXT,
             PRIMARY KEY(day, wallet)
         )
     """)
-    con.commit()
-    con.close()
+    conn.commit()
+    return conn
 
+def api_get(path, params, timeout=60):
+    response = session.get(API_BASE + path, params=params, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
 
-def save_day(day, rows):
-    con = sqlite3.connect(DB_FILE)
-    now = datetime.now(timezone.utc).isoformat()
+def fetch_builder_fills(start, end):
+    results = []
+    for offset in range(0, len(WALLETS), 10):
+        batch = WALLETS[offset:offset + 10]
+        base_params = [
+            ("start", utc_iso(start)),
+            ("end", utc_iso(end)),
+            ("fillType", "perp"),
+            ("limit", "500"),
+        ]
+        base_params += [("address[]", wallet) for wallet in batch]
+        cursor = None
+        while True:
+            params = list(base_params)
+            if cursor:
+                params.append(("cursor", cursor))
+            data = api_get(f"/builders/{BUILDER}/fills", params)
+            fills = data.get("fills", [])
+            results.extend(fills)
+            cursor = data.get("nextCursor")
+            if not cursor or not fills:
+                break
+    return results
+
+def fetch_closed_trades(wallet, start, end):
+    data = api_get("/closed-trades", {
+        "address": wallet,
+        "startTime": int(start.timestamp() * 1000),
+        "endTime": int(end.timestamp() * 1000),
+        "limit": 500,
+    })
+    return data.get("trades", [])
+
+def estimate_origami_funding(wallet_fills, closed_trades, day_start, day_end):
+    total = 0.0
+    for trade in closed_trades:
+        close_time = trade.get("closeTime")
+        if not close_time:
+            continue
+        try:
+            close_dt = parse_iso(close_time)
+        except Exception:
+            continue
+        if not (day_start <= close_dt < day_end):
+            continue
+        coin = trade.get("coin")
+        total_size = float(trade.get("totalSize", 0) or 0)
+        if not coin or total_size <= 0:
+            continue
+        candidates = []
+        for fill in wallet_fills:
+            if fill.get("coin") != coin:
+                continue
+            try:
+                fill_dt = parse_iso(fill["time"])
+            except Exception:
+                continue
+            if abs((fill_dt - close_dt).total_seconds()) <= 6 * 3600:
+                candidates.append(fill)
+        candidate_size = sum(float(f.get("sz", 0) or 0) for f in candidates)
+        if candidates and abs(candidate_size - total_size) / total_size <= 0.02:
+            total += float(trade.get("fundingUsd", 0) or 0)
+    return total
+
+def reconstruct_positions(fills, cutoff):
+    positions = {}
+    for fill in sorted(fills, key=lambda x: x.get("time", "")):
+        try:
+            fill_time = parse_iso(fill["time"])
+        except Exception:
+            continue
+        if fill_time >= cutoff:
+            continue
+        coin = fill.get("coin") or fill.get("fullCoinName")
+        if not coin:
+            continue
+        size = float(fill.get("sz", 0) or 0)
+        price = float(fill.get("px", 0) or 0)
+        direction = str(fill.get("dir", ""))
+        if "Open Long" in direction:
+            signed = size
+        elif "Close Long" in direction:
+            signed = -size
+        elif "Open Short" in direction:
+            signed = -size
+        elif "Close Short" in direction:
+            signed = size
+        else:
+            signed = size if fill.get("side") == "B" else -size
+        p = positions.setdefault(coin, {"qty": 0.0, "cost": 0.0})
+        old = p["qty"]
+        new = old + signed
+        if old == 0 or old * signed > 0:
+            p["cost"] += signed * price
+            p["qty"] = new
+        else:
+            close_qty = min(abs(old), abs(signed))
+            if old != 0:
+                p["cost"] *= max(0.0, (abs(old) - close_qty) / abs(old))
+            p["qty"] = new
+            if old * new < 0:
+                residual = abs(new)
+                p["cost"] = residual * price if new > 0 else -residual * price
+        if abs(p["qty"]) < 1e-12:
+            p["qty"] = 0.0
+            p["cost"] = 0.0
+    return positions
+
+def historical_price_proxy(coin, cutoff):
+    cutoff_ms = int(cutoff.timestamp() * 1000)
+    body = {
+        "type": "candleSnapshot",
+        "req": {
+            "coin": coin,
+            "interval": "1m",
+            "startTime": cutoff_ms - 120000,
+            "endTime": cutoff_ms + 60000,
+        },
+    }
+    response = requests.post(HL_INFO, json=body, timeout=30)
+    response.raise_for_status()
+    candles = response.json()
+    if not candles:
+        return None
+    candles.sort(key=lambda x: abs(int(x["T"]) - cutoff_ms))
+    return float(candles[0]["c"])
+
+def calculate_unrealized(wallet_fills, cutoff):
+    positions = reconstruct_positions(wallet_fills, cutoff)
+    total = 0.0
+    for coin, position in positions.items():
+        qty = position["qty"]
+        if abs(qty) < 1e-12:
+            continue
+        mark = historical_price_proxy(coin, cutoff)
+        if mark is None:
+            continue
+        avg_entry = position["cost"] / qty
+        total += (mark - avg_entry) * qty
+    return total
+
+def calculate_day(day_start, day_end, fills):
+    by_wallet = {wallet: [] for wallet in WALLETS}
+    for fill in fills:
+        address = str(fill.get("address", "")).lower()
+        if address in by_wallet:
+            by_wallet[address].append(fill)
+
+    conn = db_connect()
+    updated = utc_iso(datetime.now(timezone.utc))
 
     for wallet in WALLETS:
-        x = rows[wallet]
-        con.execute("""
+        wallet_fills = by_wallet[wallet]
+        volume = sum(
+            float(f.get("px", 0) or 0) * float(f.get("sz", 0) or 0)
+            for f in wallet_fills
+        )
+        realized = sum(float(f.get("closedPnl", 0) or 0) for f in wallet_fills)
+        fees = sum(float(f.get("fee", 0) or 0) for f in wallet_fills)
+
+        funding = 0.0
+        try:
+            trades = fetch_closed_trades(wallet, day_start, day_end)
+            funding = estimate_origami_funding(
+                wallet_fills, trades, day_start, day_end
+            )
+        except Exception as error:
+            print("Funding lookup failed:", wallet, repr(error))
+
+        cutoff = min(day_end, datetime.now(timezone.utc))
+        try:
+            unrealized = calculate_unrealized(wallet_fills, cutoff)
+        except Exception as error:
+            print("Unrealized calculation failed:", wallet, repr(error))
+            unrealized = 0.0
+
+        pnl = realized - fees + funding + unrealized
+
+        conn.execute("""
             INSERT OR REPLACE INTO daily
-            (day, wallet, volume, pnl, captured_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (day, wallet, x["volume"], x["pnl"], now))
+            (day,wallet,volume,realized,fees,funding,unrealized,pnl,updated)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, (
+            day_start.date().isoformat(),
+            wallet,
+            volume,
+            realized,
+            fees,
+            funding,
+            unrealized,
+            pnl,
+            updated,
+        ))
 
-    con.commit()
-    con.close()
+    conn.commit()
+    conn.close()
 
+POINTS = [10, 8, 6, 4, 2]
 
-def read_day(day):
-    con = sqlite3.connect(DB_FILE)
-    rows = con.execute("""
-        SELECT wallet, volume, pnl, captured_at
-        FROM daily
-        WHERE day=?
-    """, (day,)).fetchall()
-    con.close()
+def ranking_points(values, positive_only=False):
+    ordered = sorted(values, key=lambda w: values[w], reverse=True)
+    if positive_only:
+        ordered = [w for w in ordered if values[w] > 0]
+    result = {wallet: 0 for wallet in WALLETS}
+    for i, wallet in enumerate(ordered[:5]):
+        result[wallet] = POINTS[i]
+    return result
 
-    return {
-        wallet: {
-            "volume": volume,
-            "pnl": pnl,
-            "captured_at": captured,
+def get_daily_data():
+    conn = db_connect()
+    rows = conn.execute(
+        "SELECT day,wallet,volume,pnl FROM daily ORDER BY day,wallet"
+    ).fetchall()
+    conn.close()
+    data = {}
+    for day, wallet, volume, pnl in rows:
+        data.setdefault(day, {})[wallet] = {
+            "volume": volume or 0.0,
+            "pnl": pnl or 0.0,
         }
-        for wallet, volume, pnl, captured in rows
+    return data
+
+def build_weekly():
+    daily = get_daily_data()
+    metrics = {
+        wallet: {
+            "volume": 0.0,
+            "pnl": 0.0,
+            "daily_volume_points": 0.0,
+            "daily_pnl_points": 0.0,
+            "days": 0,
+        }
+        for wallet in WALLETS
     }
 
+    for day in sorted(daily):
+        day_data = daily[day]
+        volumes = {
+            w: day_data.get(w, {}).get("volume", 0.0)
+            for w in WALLETS
+        }
+        pnls = {
+            w: day_data.get(w, {}).get("pnl", 0.0)
+            for w in WALLETS
+        }
+        vp = ranking_points(volumes)
+        pp = ranking_points(pnls, positive_only=True)
 
-def day_label(i):
-    return (START + timedelta(days=i)).strftime("%Y-%m-%d")
+        for wallet in WALLETS:
+            metrics[wallet]["volume"] += volumes[wallet]
+            metrics[wallet]["pnl"] += pnls[wallet]
+            metrics[wallet]["daily_volume_points"] += vp[wallet]
+            metrics[wallet]["daily_pnl_points"] += pp[wallet]
+            metrics[wallet]["days"] += 1
 
+    weekly_volume_points = ranking_points(
+        {w: metrics[w]["volume"] for w in WALLETS}
+    )
+    weekly_pnl_points = ranking_points(
+        {w: metrics[w]["pnl"] for w in WALLETS},
+        positive_only=True,
+    )
 
-def current_day_index(now):
-    if now < START or now >= END:
-        return None
+    result = []
+    for wallet in WALLETS:
+        days = max(1, metrics[wallet]["days"])
+        avg_vol = metrics[wallet]["daily_volume_points"] / days
+        avg_pnl = metrics[wallet]["daily_pnl_points"] / days
 
-    return (now.date() - START.date()).days
+        result.append({
+            "wallet": wallet,
+            "username": USERNAMES.get(wallet, ""),
+            "volume": metrics[wallet]["volume"],
+            "pnl": metrics[wallet]["pnl"],
+            "volume_final": 0.8 * avg_vol + 0.2 * weekly_volume_points[wallet],
+            "pnl_final": 0.8 * avg_pnl + 0.2 * weekly_pnl_points[wallet],
+            "weekly_volume_points": weekly_volume_points[wallet],
+            "weekly_pnl_points": weekly_pnl_points[wallet],
+        })
+    return result
 
+def build_daily(day):
+    daily = get_daily_data()
+    source = daily.get(day, {})
 
-def snapshot_worker():
-    """
-    At every UTC cutoff:
-      00:00 Oct 3 -> save Oct 2's last 24h snapshot
-      00:00 Oct 4 -> save Oct 3's last 24h snapshot
-      ...
-    """
+    volumes = {w: source.get(w, {}).get("volume", 0.0) for w in WALLETS}
+    pnls = {w: source.get(w, {}).get("pnl", 0.0) for w in WALLETS}
+
+    vp = ranking_points(volumes)
+    pp = ranking_points(pnls, positive_only=True)
+
+    rows = []
+    for wallet in WALLETS:
+        rows.append({
+            "wallet": wallet,
+            "username": USERNAMES.get(wallet, ""),
+            "volume": volumes[wallet],
+            "pnl": pnls[wallet],
+            "volume_points": vp[wallet],
+            "pnl_points": pp[wallet],
+        })
+    return rows
+
+def refresh_worker():
+    print("Origami competition worker running:", len(WALLETS), "wallets")
     while True:
         try:
             now = datetime.now(timezone.utc)
+            if now >= COMPETITION_START:
+                day = COMPETITION_START
+                while day < COMPETITION_END and day < now:
+                    end = day + timedelta(days=1)
+                    query_end = min(end, now)
 
-            for i in range(7):
-                day_start = START + timedelta(days=i)
-                day_end = day_start + timedelta(days=1)
+                    # Completed days are stored once; the current day is
+                    # refreshed on every cycle.
+                    conn = db_connect()
+                    existing = conn.execute(
+                        "SELECT COUNT(*) FROM daily WHERE day=?",
+                        (day.date().isoformat(),),
+                    ).fetchone()[0]
+                    conn.close()
 
-                # Only snapshot shortly after the cutoff.
-                if day_end <= now < day_end + timedelta(minutes=5):
-                    day = day_start.strftime("%Y-%m-%d")
+                    if end <= now and existing == len(WALLETS):
+                        day += timedelta(days=1)
+                        continue
 
-                    if len(read_day(day)) < len(WALLETS):
-                        data = fetch()
-                        rows = extract(data, "24h")
-                        save_day(day, rows)
-                        print("Saved daily snapshot:", day, flush=True)
+                    print(
+                        "Fetching",
+                        day.date(),
+                        "->",
+                        utc_iso(query_end),
+                    )
 
-        except Exception as e:
-            print("Snapshot error:", repr(e), flush=True)
+                    fills = fetch_builder_fills(day, query_end)
+                    calculate_day(day, end, fills)
+                    day += timedelta(days=1)
 
-        time.sleep(15)
+        except Exception as error:
+            print("REFRESH ERROR:", repr(error))
 
+        time.sleep(REFRESH_SECONDS)
 
-def display_daily(i, data):
-    now = datetime.now(timezone.utc)
-    day = START + timedelta(days=i)
-    day_end = day + timedelta(days=1)
-
-    saved = read_day(day.strftime("%Y-%m-%d"))
-
-    # Current competition day:
-    # show LIVE CMM 24h data.
-    if day <= now < day_end:
-        live = extract(data, "24h")
-        return [{
-            "wallet": w,
-            "name": USERNAMES.get(w) or w[:6] + "..." + w[-4:],
-            "volume": live[w]["volume"],
-            "pnl": live[w]["pnl"],
-            "status": "live 1d",
-        } for w in WALLETS]
-
-    # Completed day:
-    # use the saved 24h snapshot.
-    return [{
-        "wallet": w,
-        "name": USERNAMES.get(w) or w[:6] + "..." + w[-4:],
-        "volume": saved[w]["volume"] if w in saved else None,
-        "pnl": saved[w]["pnl"] if w in saved else None,
-        "status": "captured" if w in saved else "waiting for cutoff",
-    } for w in WALLETS]
-
-
-def points(rows, field, positive=False):
-    eligible = [
-        r for r in rows
-        if r[field] is not None and (not positive or r[field] > 0)
-    ]
-
-    eligible.sort(key=lambda r: r[field], reverse=True)
-
-    result = {r["wallet"]: 0 for r in rows}
-
-    for i, r in enumerate(eligible[:5]):
-        result[r["wallet"]] = [10, 8, 6, 4, 2][i]
-
-    return result
-
-
-def build():
-    now = datetime.now(timezone.utc)
-    data = fetch()
-
-    days = []
-    for i in range(7):
-        rows = display_daily(i, data)
-
-        vp = points(rows, "volume")
-        pp = points(rows, "pnl", True)
-
-        for r in rows:
-            r["volume_points"] = vp[r["wallet"]]
-            r["pnl_points"] = pp[r["wallet"]]
-
-        days.append(rows)
-
-    # Weekly = CMM 7d directly.
-    weekly_raw = extract(data, "7d")
-
-    weekly = []
-    for w in WALLETS:
-        weekly.append({
-            "wallet": w,
-            "name": USERNAMES.get(w) or w[:6] + "..." + w[-4:],
-            "volume": weekly_raw[w]["volume"],
-            "pnl": weekly_raw[w]["pnl"],
-            "status": "live 7d",
-        })
-
-    wvp = points(weekly, "volume")
-    wpp = points(weekly, "pnl", True)
-
-    final = []
-    for w in WALLETS:
-        dv = [days[i][WALLETS.index(w)]["volume_points"] for i in range(7)]
-        dp = [days[i][WALLETS.index(w)]["pnl_points"] for i in range(7)]
-
-        weekly_row = next(x for x in weekly if x["wallet"] == w)
-
-        final.append({
-            "wallet": w,
-            "name": weekly_row["name"],
-            "volume": weekly_row["volume"],
-            "pnl": weekly_row["pnl"],
-            "volume_week_points": wvp[w],
-            "pnl_week_points": wpp[w],
-            "volume_avg_daily": sum(dv) / 7,
-            "pnl_avg_daily": sum(dp) / 7,
-            "volume_final_score": 0.8 * (sum(dv) / 7) + 0.2 * wvp[w],
-            "pnl_final_score": 0.8 * (sum(dp) / 7) + 0.2 * wpp[w],
-            "pnl_qualified": (
-                weekly_row["volume"] >= 20000
-                and weekly_row["pnl"] > 0
-            ),
-        })
-
-    return {
-        "competition": {
-            "start": START.isoformat(),
-            "end": END.isoformat(),
-            "now": now.isoformat(),
-            "builder": "0x9b451f8941240db8bedc99bff8917a2ed9550074",
-        },
-        "days": days,
-        "weekly": weekly,
-        "final": final,
-    }
-
-
-HTML = r"""
+HTML = """
 <!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Origami Community Trading Competition</title>
+<title>Origami Community Trading Competition 2026</title>
 <style>
-body{margin:0;background:#07090d;color:#f4f6f8;font-family:Arial,sans-serif}
-.wrap{max-width:1500px;margin:auto;padding:28px 20px 60px}
-h1{margin:0 0 8px;font-size:30px}
-.sub{color:#9ba5b4;margin-bottom:20px}
-.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
-button{background:#111722;color:#e3e8ef;border:1px solid #293345;border-radius:9px;padding:10px 14px;cursor:pointer}
-button.active{background:#fff;color:#080a0d}
-.card{background:#0d1118;border:1px solid #202938;border-radius:16px;padding:18px;margin-bottom:18px;overflow:auto}
-table{width:100%;border-collapse:collapse;min-width:850px}
-th,td{padding:12px 10px;border-bottom:1px solid #1d2531;text-align:right}
-th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
-th{font-size:12px;color:#8e9aaa;text-transform:uppercase}
-.green{color:#62e39a}.red{color:#ff7788}.muted{color:#758092}
-.badge{font-size:11px;background:#18202c;padding:5px 8px;border-radius:7px}
-.note{font-size:13px;color:#909aaa;line-height:1.6}
+body{margin:0;background:#07090d;color:#f5f7fb;font-family:Inter,system-ui,sans-serif}
+.wrap{max-width:1250px;margin:auto;padding:28px 18px 60px}
+.hero{display:flex;justify-content:space-between;gap:20px;align-items:end}
+h1{margin:0 0 8px;font-size:30px}.muted{color:#8993a5}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:24px 0}
+button{border:1px solid #222a36;background:#111720;color:#dce2eb;border-radius:10px;padding:10px 14px;cursor:pointer}
+button.active{background:#f0f3f7;color:#080b10}
+.card{background:#0e131b;border:1px solid #222a36;border-radius:16px;overflow:hidden}
+.notice{margin:18px 0;padding:12px 14px;border:1px solid #222a36;border-radius:12px;color:#aab3c1;font-size:13px}
+.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:950px}
+th,td{padding:13px 12px;border-bottom:1px solid #222a36;text-align:left}
+th{font-size:12px;color:#8993a5;text-transform:uppercase}.right{text-align:right}
+.pos{color:#39e29a}.neg{color:#ff657d}.wallet{font-size:11px;color:#697487;margin-top:3px}
 </style>
 </head>
 <body>
 <div class="wrap">
-<h1>🏆 Origami Community Trading Competition</h1>
-<div class="sub">2 Oct 2026 00:00 UTC → 9 Oct 2026 00:00 UTC · Origami builder-attributed data</div>
+<div class="hero">
+<div>
+<h1>Origami Community Trading Competition</h1>
+<div class="muted">2 Oct 2026 00:00 UTC → 9 Oct 2026 00:00 UTC · 24 wallets</div>
+</div>
+<div id="status" class="muted">Loading…</div>
+</div>
+<div class="notice">
+Origami-builder fills are used for volume and realized PnL attribution.
+Funding is matched conservatively from closed trades. Historical open-position
+PnL uses the nearest 1-minute Hyperliquid candle close as the cutoff-price
+proxy because the public API does not expose a historical mark-price series.
+</div>
 <div class="tabs" id="tabs"></div>
-<div id="app"></div>
-<div class="card note">
-<b>Data source:</b> CoinMarketMan HyperTracker Origami builder.
-Only wallets routed through the Origami builder are included.
-<br>
-<b>Daily:</b> CMM 1D / 24h data. The current day is live; completed days are saved at the UTC cutoff.
-<br>
-<b>Weekly:</b> CMM 7D data.
-<br>
-<b>Scoring:</b> Daily top 5 = 10 / 8 / 6 / 4 / 2. Final = 80% average daily points + 20% weekly points.
+<div class="card"><div class="table-wrap"><table>
+<thead><tr>
+<th>Rank</th><th>Trader</th><th>Username</th>
+<th class="right">Volume</th><th class="right">PnL</th>
+<th class="right">Daily Pts</th><th class="right">Weekly Pts</th>
+<th class="right">Final</th>
+</tr></thead>
+<tbody id="body"></tbody>
+</table></div></div>
 </div>
-</div>
-
 <script>
-let DATA=null;
-let tab="volume-week";
-
+let mode="weekly";
 const tabs=[
-["volume-week","📊 Volume — Weekly"],
-["pnl-week","💰 PnL — Weekly"],
-["volume-day-0","Volume — Oct 2"],
-["volume-day-1","Volume — Oct 3"],
-["volume-day-2","Volume — Oct 4"],
-["volume-day-3","Volume — Oct 5"],
-["volume-day-4","Volume — Oct 6"],
-["volume-day-5","Volume — Oct 7"],
-["volume-day-6","Volume — Oct 8"],
-["pnl-day-0","PnL — Oct 2"],
-["pnl-day-1","PnL — Oct 3"],
-["pnl-day-2","PnL — Oct 4"],
-["pnl-day-3","PnL — Oct 5"],
-["pnl-day-4","PnL — Oct 6"],
-["pnl-day-5","PnL — Oct 7"],
-["pnl-day-6","PnL — Oct 8"]
+["weekly","Weekly"],["day-2026-10-02","Oct 2"],["day-2026-10-03","Oct 3"],
+["day-2026-10-04","Oct 4"],["day-2026-10-05","Oct 5"],
+["day-2026-10-06","Oct 6"],["day-2026-10-07","Oct 7"],
+["day-2026-10-08","Oct 8"]
 ];
-
-function esc(x){
- return String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
+for(const [id,label] of tabs){
+ const b=document.createElement("button");b.textContent=label;
+ b.onclick=()=>{mode=id;document.querySelectorAll("button").forEach(x=>x.classList.remove("active"));b.classList.add("active");load()};
+ if(id===mode)b.className="active";
+ document.getElementById("tabs").appendChild(b);
 }
-function money(x){
- if(x===null||x===undefined)return '<span class="muted">—</span>';
- return '$'+Number(x).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
-}
-function pnl(x){
- if(x===null||x===undefined)return '<span class="muted">—</span>';
- let n=Number(x);
- return '<span class="'+(n>=0?'green':'red')+'">'+(n>=0?'+':'')+money(n)+'</span>';
-}
-function renderTabs(){
- document.getElementById("tabs").innerHTML=tabs.map(t=>
- '<button class="'+(t[0]===tab?'active':'')+
- '" onclick="tab=\''+t[0]+'\';renderTabs();render()">'+t[1]+'</button>'
- ).join("");
-}
-function render(){
- let p=tab.split("-");
- let metric=p[0];
- let scope=p[1];
- let idx=p[2];
-
- let rows;
-
- if(scope==="week"){
-   rows=DATA.final.map(r=>({
-     ...r,
-     value:r[metric],
-     points:r[metric+"_week_points"],
-     score:metric==="volume"?r.volume_final_score:r.pnl_final_score
-   }));
-   rows.sort((a,b)=>b.score-a.score);
- }else{
-   rows=DATA.days[Number(idx)].map(r=>({
-     ...r,
-     value:r[metric],
-     points:r[metric+"_points"]
-   }));
-   rows.sort((a,b)=>(b.value??-Infinity)-(a.value??-Infinity));
- }
-
- let title=metric==="volume"?"📊 Volume":"💰 PnL";
-
- let html='<div class="card"><h2>'+title+' · '+(scope==="week"?"Weekly":"Daily")+
- '</h2><table><thead><tr><th>#</th><th>Trader</th><th>'+title+
- '</th><th>Points</th>';
-
- if(scope==="week"){
-   html+='<th>Avg Daily Points</th><th>Final Score</th><th>Status</th>';
- }else{
-   html+='<th>Status</th>';
- }
-
- html+='</tr></thead><tbody>';
-
- rows.forEach((r,i)=>{
-   html+='<tr>'+
-   '<td><b>'+(i+1)+'</b></td>'+
-   '<td><b>'+esc(r.name)+'</b><br><span class="muted">'+
-   esc(r.wallet.slice(0,8)+'...'+r.wallet.slice(-6))+'</span></td>'+
-   '<td>'+(metric==="volume"?money(r.value):pnl(r.value))+'</td>'+
-   '<td><b>'+r.points+'</b></td>';
-
-   if(scope==="week"){
-     let avg=metric==="volume"?r.volume_avg_daily:r.pnl_avg_daily;
-     html+='<td>'+Number(avg).toFixed(2)+'</td>'+
-     '<td><b>'+Number(r.score).toFixed(2)+'</b></td>'+
-     '<td><span class="badge">'+esc(r.status||"live 7d")+'</span></td>';
-   }else{
-     html+='<td><span class="badge">'+esc(r.status||"")+'</span></td>';
-   }
-
-   html+='</tr>';
- });
-
- html+='</tbody></table></div>';
- document.getElementById("app").innerHTML=html;
-}
-
+function money(x){return Number(x||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
+function short(x){return x.slice(0,6)+"…"+x.slice(-4)}
+function esc(x){return String(x||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;")}
 async function load(){
  try{
-   const r=await fetch("/data?t="+Date.now(),{cache:"no-store"});
-   DATA=await r.json();
-
-   if(DATA.error){
-     document.getElementById("app").innerHTML=
-     '<div class="card">Data temporarily unavailable. Retrying…</div>';
-     return;
-   }
-
-   renderTabs();
-   render();
+  const r=await fetch("/data?mode="+encodeURIComponent(mode)+"&x="+Date.now());
+  const d=await r.json();
+  document.getElementById("status").textContent="Updated "+new Date().toLocaleTimeString();
+  document.getElementById("body").innerHTML=d.rows.map((x,i)=>`
+  <tr>
+   <td><b>${i+1}</b></td>
+   <td><b>${esc(x.username||"Anonymous Trader")}</b><div class="wallet">${short(x.wallet)}</div></td>
+   <td>${esc(x.username||"—")}</td>
+   <td class="right">$${money(x.volume)}</td>
+   <td class="right ${x.pnl>=0?"pos":"neg"}">${x.pnl>=0?"+":"-"}$${money(Math.abs(x.pnl))}</td>
+   <td class="right">${x.daily_points??x.pnl_points??0}</td>
+   <td class="right">${x.weekly_points??x.weekly_pnl_points??0}</td>
+   <td class="right"><b>${money(x.final_score??x.pnl_final??0)}</b></td>
+  </tr>`).join("");
  }catch(e){
-   document.getElementById("app").innerHTML=
-   '<div class="card">Data temporarily unavailable. Retrying…</div>';
+  document.getElementById("body").innerHTML="<tr><td colspan='8'>"+esc(e.message)+"</td></tr>";
  }
 }
-
-load();
-setInterval(load,30000);
+load();setInterval(load,60000);
 </script>
 </body>
 </html>
 """
 
-
 class Handler(BaseHTTPRequestHandler):
-    def send_text(self, status, text, content_type):
-        raw=text.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type",content_type)
-        self.send_header("Content-Length",str(len(raw)))
-        self.send_header("Cache-Control","no-store")
-        self.end_headers()
-        self.wfile.write(raw)
-
     def do_GET(self):
-        if self.path.startswith("/data"):
-            try:
-                self.send_text(
-                    200,
-                    json.dumps(build(),separators=(",",":")),
-                    "application/json; charset=utf-8"
-                )
-            except Exception as e:
-                print("DATA ERROR:",repr(e),flush=True)
-                self.send_text(
-                    200,
-                    json.dumps({"error":str(e)}),
-                    "application/json; charset=utf-8"
-                )
-        else:
-            self.send_text(200,HTML,"text/html; charset=utf-8")
+        path = urlparse(self.path).path
 
-    def log_message(self,fmt,*args):
+        if path == "/":
+            payload = HTML.encode("utf-8")
+            content_type = "text/html; charset=utf-8"
+
+        elif path == "/data":
+            mode = parse_qs(urlparse(self.path).query).get("mode", ["weekly"])[0]
+
+            if mode == "weekly":
+                rows = []
+                for row in build_weekly():
+                    rows.append({
+                        "wallet": row["wallet"],
+                        "username": row["username"],
+                        "volume": row["volume"],
+                        "pnl": row["pnl"],
+                        "daily_points": 0,
+                        "weekly_points": row["weekly_pnl_points"],
+                        "final_score": row["pnl_final"],
+                    })
+                rows.sort(key=lambda x: x["final_score"], reverse=True)
+
+            elif mode.startswith("day-"):
+                rows = []
+                for row in build_daily(mode[4:]):
+                    rows.append({
+                        "wallet": row["wallet"],
+                        "username": row["username"],
+                        "volume": row["volume"],
+                        "pnl": row["pnl"],
+                        "daily_points": row["pnl_points"],
+                        "weekly_points": 0,
+                        "final_score": row["pnl_points"],
+                    })
+                rows.sort(key=lambda x: x["pnl"], reverse=True)
+
+            else:
+                rows = []
+
+            payload = json.dumps({"rows": rows}).encode("utf-8")
+            content_type = "application/json"
+
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, fmt, *args):
         return
 
-
-def main():
-    init_db()
+if __name__ == "__main__":
+    db_connect().close()
 
     threading.Thread(
-        target=snapshot_worker,
-        daemon=True
+        target=refresh_worker,
+        daemon=True,
     ).start()
 
-    port=int(os.environ.get("PORT","8765"))
-    server=ThreadingHTTPServer(("0.0.0.0",port),Handler)
+    print("Origami competition leaderboard running on", PORT)
+    print("Wallet count:", len(WALLETS))
+    print("Builder:", BUILDER)
 
-    print("Origami competition leaderboard running on",port,flush=True)
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
-
-
-if __name__=="__main__":
-    main()
