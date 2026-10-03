@@ -367,15 +367,26 @@ def build_weekly():
         avg_vol = metrics[wallet]["daily_volume_points"] / days
         avg_pnl = metrics[wallet]["daily_pnl_points"] / days
 
+        # PnL prize eligibility requires at least $20,000 volume
+        # and positive weekly net PnL.
+        pnl_eligible = (
+            metrics[wallet]["volume"] >= 20000
+            and metrics[wallet]["pnl"] > 0
+        )
+
         result.append({
             "wallet": wallet,
             "username": USERNAMES.get(wallet, ""),
             "volume": metrics[wallet]["volume"],
             "pnl": metrics[wallet]["pnl"],
             "volume_final": 0.8 * avg_vol + 0.2 * weekly_volume_points[wallet],
-            "pnl_final": 0.8 * avg_pnl + 0.2 * weekly_pnl_points[wallet],
+            "pnl_final": (
+                0.8 * avg_pnl + 0.2 * weekly_pnl_points[wallet]
+                if pnl_eligible else 0.0
+            ),
             "weekly_volume_points": weekly_volume_points[wallet],
             "weekly_pnl_points": weekly_pnl_points[wallet],
+            "pnl_eligible": pnl_eligible,
         })
     return result
 
@@ -458,10 +469,11 @@ button{border:1px solid #222a36;background:#111720;color:#dce2eb;border-radius:1
 button.active{background:#f0f3f7;color:#080b10}
 .card{background:#0e131b;border:1px solid #222a36;border-radius:16px;overflow:hidden}
 .notice{margin:18px 0;padding:12px 14px;border:1px solid #222a36;border-radius:12px;color:#aab3c1;font-size:13px}
-.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:950px}
+.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:1050px}
 th,td{padding:13px 12px;border-bottom:1px solid #222a36;text-align:left}
 th{font-size:12px;color:#8993a5;text-transform:uppercase}.right{text-align:right}
 .pos{color:#39e29a}.neg{color:#ff657d}.wallet{font-size:11px;color:#697487;margin-top:3px}
+.stream{font-weight:700;color:#f5f7fb;margin-bottom:6px}
 </style>
 </head>
 <body>
@@ -473,65 +485,112 @@ th{font-size:12px;color:#8993a5;text-transform:uppercase}.right{text-align:right
 </div>
 <div id="status" class="muted">Loading…</div>
 </div>
+
 <div class="notice">
-Origami-builder fills are used for volume and realized PnL attribution.
-Funding is matched conservatively from closed trades. Historical open-position
-PnL uses the nearest 1-minute Hyperliquid candle close as the cutoff-price
-proxy because the public API does not expose a historical mark-price series.
+<b>Volume:</b> every Origami-builder perp fill counts by executed notional
+(price × size), including both opening and closing trades.
+&nbsp;&nbsp;|&nbsp;&nbsp;
+<b>PnL:</b> Origami-builder fills, fees, matched funding and historical
+unrealized-PnL proxy are used.
+<br><br>
+Final score for each stream = 80% × average daily points + 20% × weekly points.
+PnL qualification requires at least $20,000 weekly volume and positive weekly net PnL.
 </div>
+
 <div class="tabs" id="tabs"></div>
+
 <div class="card"><div class="table-wrap"><table>
 <thead><tr>
 <th>Rank</th><th>Trader</th><th>Username</th>
 <th class="right">Volume</th><th class="right">PnL</th>
 <th class="right">Daily Pts</th><th class="right">Weekly Pts</th>
-<th class="right">Final</th>
+<th class="right">Final Score</th>
 </tr></thead>
 <tbody id="body"></tbody>
 </table></div></div>
 </div>
+
 <script>
-let mode="weekly";
+let mode="volume-weekly";
+
 const tabs=[
-["weekly","Weekly"],["day-2026-10-02","Oct 2"],["day-2026-10-03","Oct 3"],
-["day-2026-10-04","Oct 4"],["day-2026-10-05","Oct 5"],
-["day-2026-10-06","Oct 6"],["day-2026-10-07","Oct 7"],
+["volume-weekly","🏆 Volume Weekly"],
+["pnl-weekly","💰 PnL Weekly"],
+["day-2026-10-02","Oct 2"],
+["day-2026-10-03","Oct 3"],
+["day-2026-10-04","Oct 4"],
+["day-2026-10-05","Oct 5"],
+["day-2026-10-06","Oct 6"],
+["day-2026-10-07","Oct 7"],
 ["day-2026-10-08","Oct 8"]
 ];
+
 for(const [id,label] of tabs){
- const b=document.createElement("button");b.textContent=label;
- b.onclick=()=>{mode=id;document.querySelectorAll("button").forEach(x=>x.classList.remove("active"));b.classList.add("active");load()};
+ const b=document.createElement("button");
+ b.textContent=label;
+ b.onclick=()=>{
+   mode=id;
+   document.querySelectorAll("#tabs button").forEach(x=>x.classList.remove("active"));
+   b.classList.add("active");
+   load();
+ };
  if(id===mode)b.className="active";
  document.getElementById("tabs").appendChild(b);
 }
-function money(x){return Number(x||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
+
+function money(x){
+ return Number(x||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+}
 function short(x){return x.slice(0,6)+"…"+x.slice(-4)}
-function esc(x){return String(x||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;")}
+function esc(x){
+ return String(x||"").replaceAll("&","&amp;").replaceAll("<","&lt;")
+   .replaceAll(">","&gt;").replaceAll('"',"&quot;");
+}
+
 async function load(){
  try{
   const r=await fetch("/data?mode="+encodeURIComponent(mode)+"&x="+Date.now());
   const d=await r.json();
-  document.getElementById("status").textContent="Updated "+new Date().toLocaleTimeString();
-  document.getElementById("body").innerHTML=d.rows.map((x,i)=>`
-  <tr>
-   <td><b>${i+1}</b></td>
-   <td><b>${esc(x.username||"Anonymous Trader")}</b><div class="wallet">${short(x.wallet)}</div></td>
-   <td>${esc(x.username||"—")}</td>
-   <td class="right">$${money(x.volume)}</td>
-   <td class="right ${x.pnl>=0?"pos":"neg"}">${x.pnl>=0?"+":"-"}$${money(Math.abs(x.pnl))}</td>
-   <td class="right">${x.daily_points??x.pnl_points??0}</td>
-   <td class="right">${x.weekly_points??x.weekly_pnl_points??0}</td>
-   <td class="right"><b>${money(x.final_score??x.pnl_final??0)}</b></td>
-  </tr>`).join("");
+
+  document.getElementById("status").textContent=
+    "Updated "+new Date().toLocaleTimeString();
+
+  document.getElementById("body").innerHTML=d.rows.map((x,i)=>{
+    const score = Number(x.final_score||0);
+    const pnl = Number(x.pnl||0);
+    const volume = Number(x.volume||0);
+
+    return `
+    <tr>
+      <td><b>${i+1}</b></td>
+      <td>
+        <b>${esc(x.username||"Anonymous Trader")}</b>
+        <div class="wallet">${short(x.wallet)}</div>
+      </td>
+      <td>${esc(x.username||"—")}</td>
+      <td class="right">$${money(volume)}</td>
+      <td class="right ${pnl>=0?"pos":"neg"}">
+        ${pnl>=0?"+":"-"}$${money(Math.abs(pnl))}
+      </td>
+      <td class="right">${x.daily_points??0}</td>
+      <td class="right">${x.weekly_points??0}</td>
+      <td class="right"><b>${money(score)}</b></td>
+    </tr>`;
+  }).join("");
+
  }catch(e){
-  document.getElementById("body").innerHTML="<tr><td colspan='8'>"+esc(e.message)+"</td></tr>";
+  document.getElementById("body").innerHTML=
+    "<tr><td colspan='8'>"+esc(e.message)+"</td></tr>";
  }
 }
-load();setInterval(load,60000);
+
+load();
+setInterval(load,60000);
 </script>
 </body>
 </html>
 """
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -544,18 +603,33 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/data":
             mode = parse_qs(urlparse(self.path).query).get("mode", ["weekly"])[0]
 
-            if mode == "weekly":
+            if mode in ("volume-weekly", "pnl-weekly"):
+                weekly = build_weekly()
                 rows = []
-                for row in build_weekly():
-                    rows.append({
-                        "wallet": row["wallet"],
-                        "username": row["username"],
-                        "volume": row["volume"],
-                        "pnl": row["pnl"],
-                        "daily_points": 0,
-                        "weekly_points": row["weekly_pnl_points"],
-                        "final_score": row["pnl_final"],
-                    })
+
+                for row in weekly:
+                    if mode == "volume-weekly":
+                        rows.append({
+                            "wallet": row["wallet"],
+                            "username": row["username"],
+                            "volume": row["volume"],
+                            "pnl": row["pnl"],
+                            "daily_points": 0,
+                            "weekly_points": row["weekly_volume_points"],
+                            "final_score": row["volume_final"],
+                        })
+                    else:
+                        rows.append({
+                            "wallet": row["wallet"],
+                            "username": row["username"],
+                            "volume": row["volume"],
+                            "pnl": row["pnl"],
+                            "daily_points": 0,
+                            "weekly_points": row["weekly_pnl_points"],
+                            "final_score": row["pnl_final"],
+                            "pnl_eligible": row["pnl_eligible"],
+                        })
+
                 rows.sort(key=lambda x: x["final_score"], reverse=True)
 
             elif mode.startswith("day-"):
@@ -566,11 +640,11 @@ class Handler(BaseHTTPRequestHandler):
                         "username": row["username"],
                         "volume": row["volume"],
                         "pnl": row["pnl"],
-                        "daily_points": row["pnl_points"],
+                        "daily_points": row["volume_points"],
                         "weekly_points": 0,
-                        "final_score": row["pnl_points"],
+                        "final_score": row["volume_points"],
                     })
-                rows.sort(key=lambda x: x["pnl"], reverse=True)
+                rows.sort(key=lambda x: x["volume"], reverse=True)
 
             else:
                 rows = []
