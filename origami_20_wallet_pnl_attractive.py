@@ -314,7 +314,7 @@ def build_weekly():
 
     result = []
     for wallet in WALLETS:
-        days = max(1, metrics[wallet]["days"])
+        days = 7 if metrics[wallet]["days"] >= 7 else max(1, metrics[wallet]["days"])
         avg_vol = metrics[wallet]["daily_volume_points"] / days
         avg_pnl = metrics[wallet]["daily_pnl_points"] / days
 
@@ -330,6 +330,8 @@ def build_weekly():
             "username": USERNAMES.get(wallet, ""),
             "volume": metrics[wallet]["volume"],
             "pnl": metrics[wallet]["pnl"],
+            "daily_volume_points": metrics[wallet]["daily_volume_points"],
+            "daily_pnl_points": metrics[wallet]["daily_pnl_points"],
             "volume_final": 0.8 * avg_vol + 0.2 * weekly_volume_points[wallet],
             "pnl_final": (
                 0.8 * avg_pnl + 0.2 * weekly_pnl_points[wallet]
@@ -562,33 +564,37 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/data":
             mode = parse_qs(urlparse(self.path).query).get("mode", ["weekly"])[0]
 
+            try:
+                if mode in ("volume-weekly", "pnl-weekly"):
+                    weekly=build_weekly()
+                    rows=[]
+                    for row in weekly:
+                        if mode=="volume-weekly":
+                            rows.append({"wallet":row["wallet"],"username":row["username"],
+                                         "volume":row["volume"],"pnl":row["pnl"],
+                                         "daily_points":row["daily_volume_points"],
+                                         "weekly_points":row["weekly_volume_points"],
+                                         "final_score":row["volume_final"]})
+                        else:
+                            rows.append({"wallet":row["wallet"],"username":row["username"],
+                                         "volume":row["volume"],"pnl":row["pnl"],
+                                         "daily_points":row["daily_pnl_points"],
+                                         "weekly_points":row["weekly_pnl_points"],
+                                         "final_score":row["pnl_final"]})
+                    rows.sort(key=lambda x:x["final_score"],reverse=True)
 
-            if mode in ("volume-weekly", "pnl-weekly"):
-                weekly=build_weekly()
-                rows=[]
-                for row in weekly:
-                    if mode=="volume-weekly":
-                        rows.append({"wallet":row["wallet"],"username":row["username"],
-                                     "volume":row["volume"],"pnl":row["pnl"],
-                                     "daily_points":row["daily_volume_points"],
-                                     "weekly_points":row["weekly_volume_points"],
-                                     "final_score":row["volume_final"]})
-                    else:
-                        rows.append({"wallet":row["wallet"],"username":row["username"],
-                                     "volume":row["volume"],"pnl":row["pnl"],
-                                     "daily_points":row["daily_pnl_points"],
-                                     "weekly_points":row["weekly_pnl_points"],
-                                     "final_score":row["pnl_final"]})
-                rows.sort(key=lambda x:x["final_score"],reverse=True)
+                elif mode.startswith("volume-day-"):
+                    rows=build_daily(mode[len("volume-day-"):],"volume")
+                elif mode.startswith("pnl-day-"):
+                    rows=build_daily(mode[len("pnl-day-"):],"pnl")
+                else:
+                    rows=[]
 
-            elif mode.startswith("volume-day-"):
-                rows=build_daily(mode[len("volume-day-"):],"volume")
-            elif mode.startswith("pnl-day-"):
-                rows=build_daily(mode[len("pnl-day-"):],"pnl")
-            else:
-                rows=[]
+                payload = json.dumps({"rows": rows}).encode("utf-8")
+            except Exception as e:
+                print("DATA ERROR:", repr(e))
+                payload = json.dumps({"rows": [], "error": str(e)}).encode("utf-8")
 
-            payload = json.dumps({"rows": rows}).encode("utf-8")
             content_type = "application/json"
 
         else:
