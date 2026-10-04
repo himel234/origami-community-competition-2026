@@ -65,6 +65,7 @@ USERNAMES = {
     "0x7f2663fc903d269a9670ce5ad76d92f7a0b70e66": "@Safal818",
     "0x8a591916b925c399a4d2791d186dfae5366cc12a": "@Eleonore3663",
     "0xe2e683b515a8a916a0444e68ec3fcb0361e64df3": "@simonkeep",
+    "0x9701d4d5b1910462354368bb0f7bc31dac0e601a": "@uptober_v",
 }
 
 HEADERS = {"Authorization": f"Bearer {API_KEY}", "Accept": "application/json"}
