@@ -50,7 +50,7 @@ WALLETS = [
     "0xec3c5055f1d402e41c9974fb8291265e087baa9c",
     "0xbe017f5edc123d52572be3743e3e136fccd4c484",
     "0x9701d4d5b1910462354368bb0f7bc31dac0e601a",
-    "0xe2E683b515A8a916a0444E68ec3fcB0361e64Df3",
+    "0xe2e683b515a8a916a0444e68ec3fcb0361e64df3",
 ]
 
 USERNAMES = {
@@ -64,7 +64,7 @@ USERNAMES = {
     "0x28a97f53f11becbb1d531ed26a953cba87d115c8": "@Edward6742",
     "0x7f2663fc903d269a9670ce5ad76d92f7a0b70e66": "@Safal818",
     "0x8a591916b925c399a4d2791d186dfae5366cc12a": "@Eleonore3663",
-    "0xe2E683b515A8a916a0444E68ec3fcB0361e64Df3": "@simonkeep",
+    "0xe2e683b515a8a916a0444e68ec3fcb0361e64df3": "@simonkeep",
 }
 
 HEADERS = {"Authorization": f"Bearer {API_KEY}", "Accept": "application/json"}
